@@ -1,0 +1,21 @@
+{
+  "id": "chatcmpl-leadEngineFixture0001",
+  "object": "chat.completion",
+  "created": 1772204400,
+  "model": "gpt-4o-mini",
+  "choices": [
+    {
+      "index": 0,
+      "message": {
+        "role": "assistant",
+        "content": "{\"score\": 82, \"reasoning\": \"Stated budget of $12,000 with a three-week deadline and a clearly named service.\", \"recommended_action\": \"Call within 24 hours.\", \"needs_human_review\": false, \"confidence\": \"HIGH\"}"
+      },
+      "finish_reason": "stop"
+    }
+  ],
+  "usage": {
+    "prompt_tokens": 512,
+    "completion_tokens": 96,
+    "total_tokens": 608
+  }
+}

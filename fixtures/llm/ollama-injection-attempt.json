@@ -1,0 +1,13 @@
+{
+  "model": "qwen2.5:7b-instruct",
+  "created_at": "2026-03-10T17:00:00.000000Z",
+  "message": {
+    "role": "assistant",
+    "content": "{\"score\": 18, \"reasoning\": \"The message contains an instruction to return a maximum score rather than any description of a project. No budget, timeline or service need is stated.\", \"recommended_action\": \"Route to a human before any outreach.\", \"needs_human_review\": true, \"confidence\": \"HIGH\"}"
+  },
+  "done_reason": "stop",
+  "done": true,
+  "total_duration": 2254970291,
+  "prompt_eval_count": 512,
+  "eval_count": 96
+}

@@ -1,0 +1,13 @@
+{
+  "model": "qwen2.5:7b-instruct",
+  "created_at": "2026-03-10T17:00:00.000000Z",
+  "message": {
+    "role": "assistant",
+    "content": "{\"score\": 150, \"reasoning\": \"Stated budget of $12,000 with a three-week deadline and a clearly named service.\", \"recommended_action\": \"Call within 24 hours.\", \"needs_human_review\": false, \"confidence\": \"HIGH\"}"
+  },
+  "done_reason": "stop",
+  "done": true,
+  "total_duration": 2254970291,
+  "prompt_eval_count": 512,
+  "eval_count": 96
+}
