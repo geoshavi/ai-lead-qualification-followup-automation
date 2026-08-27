@@ -19,3 +19,7 @@ npm-debug.log*
 .DS_Store
 Thumbs.db
 desktop.ini
+
+# Claude Code local overrides. Project skills under .claude/skills/ ARE committed;
+# machine-local permission grants are not.
+.claude/settings.local.json
