@@ -35,10 +35,18 @@ export const CADENCE_HOURS = Object.freeze({
 export const DEFAULT_BUSINESS_HOURS = Object.freeze({
   startHour: 9,
   endHour: 18,
-  // 'same-day': 07:00 Tuesday becomes 09:00 Tuesday (the next moment in hours).
-  // 'next-day': 07:00 Tuesday becomes 09:00 Wednesday (literal reading of the
-  //             spec's "move it to 09:00 on the next business day").
-  beforeHoursPolicy: 'same-day',
+  // What to do with a send computed BEFORE the window opens.
+  //
+  // 'next-day' is the default because spec section 6.2 says it plainly: a time
+  // outside 09:00-18:00 moves to "09:00 on the next business day". 07:00
+  // Tuesday becomes 09:00 Wednesday. Before-hours and after-hours are the same
+  // rule, so they get the same treatment.
+  //
+  // 'same-day' (07:00 Tuesday -> 09:00 Tuesday) is available as an explicit
+  // opt-in for a client who wants the earliest slot rather than the next day.
+  // It is deliberately not the default: that would be a nicer-sounding rule
+  // than the one the spec actually states.
+  beforeHoursPolicy: 'next-day',
 });
 
 const MS_PER_HOUR = 3600000;

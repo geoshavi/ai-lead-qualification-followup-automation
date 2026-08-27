@@ -192,20 +192,48 @@ describe('business-hours clamping', () => {
 describe('before-hours policy', () => {
   const earlyTuesday = Date.parse('2026-03-03T15:00:00Z'); // Tue 07:00 PST
 
-  test('defaults to same-day 09:00', () => {
-    assert.equal(DEFAULT_BUSINESS_HOURS.beforeHoursPolicy, 'same-day');
-    assert.equal(wall(clampToBusinessHours(earlyTuesday, TZ)), 'Tue, 03/03/2026, 09:00');
+  test('the default is next-day, the literal reading of spec 6.2', () => {
+    assert.equal(DEFAULT_BUSINESS_HOURS.beforeHoursPolicy, 'next-day');
   });
 
-  test('next-day policy defers to the following business morning', () => {
-    const clamped = clampToBusinessHours(earlyTuesday, TZ, { beforeHoursPolicy: 'next-day' });
-    assert.equal(wall(clamped), 'Wed, 03/04/2026, 09:00');
+  test('by default, a before-hours send moves to 09:00 the NEXT business day', () => {
+    assert.equal(wall(clampToBusinessHours(earlyTuesday, TZ)), 'Wed, 03/04/2026, 09:00');
   });
 
-  test('next-day policy still skips the weekend', () => {
+  test('by default, before hours and after hours are treated identically', () => {
+    // Spec 6.2 states one rule for anything "outside 09:00-18:00". Sending
+    // early on the same day would quietly make before-hours the exception.
+    const lateTuesday = Date.parse('2026-03-04T04:00:00Z'); // Tue 20:00 PST
+    assert.equal(wall(clampToBusinessHours(earlyTuesday, TZ)), 'Wed, 03/04/2026, 09:00');
+    assert.equal(wall(clampToBusinessHours(lateTuesday, TZ)), 'Wed, 03/04/2026, 09:00');
+  });
+
+  test('by default, an early Friday send lands on Monday rather than Saturday', () => {
     const earlyFriday = Date.parse('2026-03-06T15:00:00Z'); // Fri 07:00 PST
-    const clamped = clampToBusinessHours(earlyFriday, TZ, { beforeHoursPolicy: 'next-day' });
+    assert.equal(wall(clampToBusinessHours(earlyFriday, TZ)), 'Mon, 03/09/2026, 09:00');
+  });
+
+  test('same-day is available as an explicit, non-default opt-in', () => {
+    const clamped = clampToBusinessHours(earlyTuesday, TZ, { beforeHoursPolicy: 'same-day' });
+    assert.equal(wall(clamped), 'Tue, 03/03/2026, 09:00');
+  });
+
+  test('the same-day opt-in still refuses to send on a weekend', () => {
+    const earlySaturday = Date.parse('2026-03-07T15:00:00Z'); // Sat 07:00 PST
+    const clamped = clampToBusinessHours(earlySaturday, TZ, { beforeHoursPolicy: 'same-day' });
     assert.equal(wall(clamped), 'Mon, 03/09/2026, 09:00');
+  });
+
+  test('the default reaches computeNextFollowup, which is what the scheduler calls', () => {
+    // Clamping the leaf helper correctly is not the point; the scheduled send
+    // is. Anchor Mon 06:00 PST, so HOT step 1 (+24h) lands Tue 06:00 — before
+    // hours — and must defer to Wednesday morning.
+    const mondayEarly = Date.parse('2026-03-02T14:00:00Z'); // Mon 06:00 PST
+    const scheduled = computeNextFollowup({
+      temperature: 'HOT', step: 1, anchor: mondayEarly, timeZone: TZ,
+    });
+
+    assert.equal(wall(Date.parse(scheduled.nextAt)), 'Wed, 03/04/2026, 09:00');
   });
 
   test('a custom window is honoured', () => {
