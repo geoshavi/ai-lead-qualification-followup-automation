@@ -1,0 +1,26 @@
+# Normalise line endings.
+#
+# Development happens on Windows; n8n, Postgres, and Supabase run on Linux.
+# Without this, every file round-trips between CRLF and LF and produces diff
+# noise that hides real changes. LF is stored in the repository and checked out
+# as LF everywhere.
+
+* text=auto eol=lf
+
+# Be explicit for the file types this project actually contains, so the
+# behaviour does not depend on Git's content heuristics.
+*.js    text eol=lf
+*.json  text eol=lf
+*.sql   text eol=lf
+*.md    text eol=lf
+*.yml   text eol=lf
+*.yaml  text eol=lf
+*.sh    text eol=lf
+.env.example text eol=lf
+
+# Never touch binaries (screenshots for the demo land here later).
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.pdf binary

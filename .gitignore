@@ -1,0 +1,21 @@
+# Dependencies
+node_modules/
+
+# Secrets — .env.example is committed, real .env files never are
+.env
+.env.local
+.env.*.local
+!.env.example
+
+# Local mock CRM state (mockCrm.js persists here; demo data, not source)
+.data/
+
+# Test + tooling output
+coverage/
+*.log
+npm-debug.log*
+
+# OS / editor cruft
+.DS_Store
+Thumbs.db
+desktop.ini

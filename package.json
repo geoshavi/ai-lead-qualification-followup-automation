@@ -1,0 +1,17 @@
+{
+  "name": "lead-engine",
+  "version": "0.1.0",
+  "private": true,
+  "description": "AI lead qualification and follow-up automation. Business logic lives in n8n Code nodes, generated from unit-tested, dependency-free modules in src/core.",
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "test": "node --test",
+    "test:watch": "node --test --watch",
+    "test:coverage": "node --test --experimental-test-coverage"
+  },
+  "dependencies": {},
+  "devDependencies": {}
+}
