@@ -7,12 +7,14 @@ deterministic follow-up sequence that stops when it should. Duplicate submission
 cannot create duplicate rows or duplicate messages — that guarantee is enforced by
 the database, not by workflow logic.
 
-> **Status: M2 (Persistence) complete.** Schema, test runner, the seven pure
-> business-logic modules, and both CRM adapters are in place: 375 tests offline,
-> 430 with the hosted-parity half enabled. `mockCrm.js` and `supabaseCrm.js` are
-> held to one shared contract suite. The AI layer begins at M3. See
-> `PROJECT_SPEC.md` §9 for the full milestone plan. This README is expanded into
-> full documentation at M9.
+> **Status: M3 (AI layer) complete.** Schema, test runner, the nine pure
+> business-logic modules, both CRM adapters, and the provider-neutral AI layer
+> are in place: 523 tests, 522 passing, 1 skipped (the M2 hosted-parity marker,
+> which only runs when a Postgres/PostgREST endpoint is configured). The full
+> suite runs with no network calls — `ollamaLlm.js` is the default provider,
+> `anthropicLlm.js` and `openaiLlm.js` are optional and configuration-only. The
+> n8n vertical slice begins at M4. See `PROJECT_SPEC.md` §9 for the full
+> milestone plan. This README is expanded into full documentation at M9.
 
 ---
 
@@ -42,7 +44,8 @@ workflow topology, or the database schema.
 - PostgreSQL 13+ *or* a Supabase Free project — only when running the hosted path
 - Docker — optional, only to run the hosted-parity half of the test suite locally
   without an account (see `src/adapters/crmInterface.md`)
-- Ollama — only from M3 onward
+- Ollama — only to run a live scoring call; the test suite scores against
+  recorded fixtures and needs no LLM running at all (see `src/adapters/llm/llmInterface.md`)
 
 ## Setup
 
