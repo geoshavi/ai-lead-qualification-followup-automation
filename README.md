@@ -7,10 +7,12 @@ deterministic follow-up sequence that stops when it should. Duplicate submission
 cannot create duplicate rows or duplicate messages — that guarantee is enforced by
 the database, not by workflow logic.
 
-> **Status: M1 (Core logic) complete.** Schema, test runner, and the seven pure
-> business-logic modules are in place, with 304 tests and 100% line coverage of
-> `src/core/`. Persistence adapters begin at M2. See `PROJECT_SPEC.md` §9 for the
-> full milestone plan. This README is expanded into full documentation at M9.
+> **Status: M2 (Persistence) complete.** Schema, test runner, the seven pure
+> business-logic modules, and both CRM adapters are in place: 375 tests offline,
+> 430 with the hosted-parity half enabled. `mockCrm.js` and `supabaseCrm.js` are
+> held to one shared contract suite. The AI layer begins at M3. See
+> `PROJECT_SPEC.md` §9 for the full milestone plan. This README is expanded into
+> full documentation at M9.
 
 ---
 
@@ -38,6 +40,8 @@ workflow topology, or the database schema.
 - Node.js ≥ 20 (uses the built-in `node --test` runner — the project has **zero
   npm dependencies**, production or dev)
 - PostgreSQL 13+ *or* a Supabase Free project — only when running the hosted path
+- Docker — optional, only to run the hosted-parity half of the test suite locally
+  without an account (see `src/adapters/crmInterface.md`)
 - Ollama — only from M3 onward
 
 ## Setup
@@ -46,6 +50,11 @@ workflow topology, or the database schema.
 cp .env.example .env        # defaults already describe the $0 path
 npm test                    # no install step; there are no dependencies
 ```
+
+`npm test` is offline and free: it runs against `mockCrm.js`, which keeps state in
+a JSON file under `.data/`. Setting `SUPABASE_URL` additionally runs the identical
+contract suite against `supabaseCrm.js` — that parity run is what stops the free
+local path from drifting away from hosted Postgres.
 
 To apply the schema to a Postgres instance:
 
@@ -63,10 +72,9 @@ Business logic lives **inside n8n Code nodes**, not in an external service. This
 a portfolio piece for n8n work, so the canvas has to be doing real work rather than
 proxying to an API. Because Code nodes cannot `require()` local files, every module
 in `src/core/` is written as a plain function with **zero imports**, and a build step
-(`npm run build:nodes`, arriving at M1 alongside the first core modules) concatenates
-each one into a self-contained snippet in `dist/nodes/` ready to paste into a node.
-Tests import from `src/core/` directly and
-run in Node. `src/core/` is the source of truth — `dist/` is generated and must
+(`npm run build:nodes`, arriving at M4 with the first n8n canvas) concatenates each
+one into a self-contained snippet in `dist/nodes/` ready to paste into a node. Tests
+import from `src/core/` directly and run in Node. `src/core/` is the source of truth — `dist/` is generated and must
 never be hand-edited.
 
 ## Two design decisions worth pointing at
