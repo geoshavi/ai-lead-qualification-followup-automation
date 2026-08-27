@@ -7,9 +7,10 @@ deterministic follow-up sequence that stops when it should. Duplicate submission
 cannot create duplicate rows or duplicate messages — that guarantee is enforced by
 the database, not by workflow logic.
 
-> **Status: M0 (Foundation) complete.** Schema, test runner, and environment
-> scaffolding are in place. Core logic begins at M1. See `PROJECT_SPEC.md` §9 for
-> the full milestone plan. This README is expanded into full documentation at M9.
+> **Status: M1 (Core logic) complete.** Schema, test runner, and the seven pure
+> business-logic modules are in place, with 304 tests and 100% line coverage of
+> `src/core/`. Persistence adapters begin at M2. See `PROJECT_SPEC.md` §9 for the
+> full milestone plan. This README is expanded into full documentation at M9.
 
 ---
 
