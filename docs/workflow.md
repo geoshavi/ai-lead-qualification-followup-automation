@@ -49,24 +49,28 @@ container needs no account, matching section 1.1's default stack.
      |               |
 [Respond 401]  [Code: Normalize + Validate]  <-- normalize.js, validate.js
 [Postgres:                |
- log WORKFLOW_ERROR]  [IF: valid?]
-                       /       \
-                    FALSE     TRUE
-                      |          |
-              [Postgres:   [Code: Build Dedupe Key]   <-- dedupe.js
-               log               |
-               VALIDATION_    [Postgres: Upsert Lead]  (raw SQL, section 4)
-               FAILED]              |
-              [Respond 200,   [IF: was this a fresh insert?]
-               needs_review]    /                  \
-                              FALSE                TRUE
-                                |                     |
-                        [Postgres: log      [Code: Build Scoring Prompt]  <-- prompt.js, sanitize.js
-                         DUPLICATE_FOUND]         |
-                        [Respond 200,       [HTTP Request: Ollama /api/chat]
-                         duplicate]               |
-                                            [Code: Parse Score (attempt 1)]  <-- scoreParse.js
-                                                   |
+ log WORKFLOW_ERROR]  [Code: Build Dedupe Key + Review Patch]  <-- dedupe.js
+                            |
+                      [IF: dedupe key derivable?]
+                       /                  \
+                    FALSE                TRUE
+                      |                     |
+              [Postgres: log        [Postgres: Upsert Lead]  (raw SQL, section 4;
+               VALIDATION_FAILED,          |                  crm_status carries
+               lead_id = NULL]       [IF: was this a fresh insert?]   HUMAN_REVIEW
+              [Respond 200]           /                  \            when invalid)
+                                    FALSE                TRUE
+                                      |                     |
+                          [Postgres: log       [IF: was THIS submission valid?]
+                           DUPLICATE_FOUND]        /                    \
+                          [Postgres: log        FALSE                 TRUE
+                           VALIDATION_FAILED       |                     |
+                           if this submission  [Postgres: log   [Code: Build Scoring Prompt]  <-- prompt.js, sanitize.js
+                           was itself invalid]  VALIDATION_             |
+                          [Respond 200]         FAILED]        [HTTP Request: Ollama /api/chat]
+                                                [Respond 200]          |
+                                          (no scoring, no Slack   [Code: Parse Score (attempt 1)]  <-- scoreParse.js
+                                           for either branch)            |
                                              [IF: parsed ok?]
                                               /            \
                                            FALSE           TRUE
@@ -166,24 +170,68 @@ const validation = validateLead(lead);
 return [{ json: { lead, validation } }];
 ```
 
-### 2.5 IF: valid?
+Note what does **not** happen here: there is no longer a gate that stops an
+invalid lead. `validateLead` already carries everything needed to route it —
+`needsHumanReview` and a `reviewReason` string like
+`validation_failed:email,contact` — this step just carries `validation`
+forward so the next two steps can use it. An invalid lead is never discarded
+(scenario 7, section 10): it is persisted, flagged, and routed away from
+scoring — never silently dropped.
 
-Condition: `{{$json.validation.ok}}` is `true`.
-
-**FALSE branch:**
-- **Postgres node** — `INSERT INTO lead_events (event_type, status, details, error_message) VALUES ('VALIDATION_FAILED', 'FAILURE', $1, $2)`, `details` = `{{JSON.stringify($json.validation.errors)}}`.
-- **Respond to Webhook** — status `200`, body noting the lead needs human review (spec 5.3's rule — a validation failure never drops the lead outright at this layer either, but section 9's minimum slice does not require inserting an unvalidated row; document this as a known M4 boundary, tightened if a later milestone needs it).
-
-### 2.6 Code: Build Dedupe Key
+### 2.5 Code: Build Dedupe Key + Review Patch
 
 Paste **`dist/nodes/dedupe.js`**, then:
 
 ```js
-const lead = $input.first().json.lead;
-const built = buildDedupeKey(lead, { now: new Date() });
+const { lead, validation } = $input.first().json;
 
-return [{ json: { ...lead, dedupe_key: built.key, needs_human_review: built.needsHumanReview, review_reason: built.reviewReason } }];
+let built;
+let dedupeKeyDerivable = true;
+try {
+  built = buildDedupeKey(lead, { now: new Date() });
+} catch {
+  // buildDedupeKey only throws when source_id, email and phone are ALL
+  // absent — no identity of any kind, not even the weak name+company+day
+  // fallback has anything to hash. Unreachable in practice on this canvas
+  // (a `now` is always supplied, so the fallback strategy always succeeds
+  // given at least a clock), but handled per spec rather than assumed away.
+  dedupeKeyDerivable = false;
+}
+
+if (!dedupeKeyDerivable) {
+  return [{ json: { lead, validation, dedupeKeyDerivable: false } }];
+}
+
+const reasons = [];
+if (!validation.ok) reasons.push(validation.reviewReason);
+if (built.needsHumanReview) reasons.push(built.reviewReason);
+
+return [{
+  json: {
+    ...lead,
+    validation,
+    dedupeKeyDerivable: true,
+    dedupe_key: built.key,
+    // A validation failure routes the row to a person from the moment it is
+    // created — crm_status starts at HUMAN_REVIEW, not the schema default
+    // NEW, so it is never mistaken for a lead simply awaiting triage.
+    crm_status: validation.ok ? 'NEW' : 'HUMAN_REVIEW',
+    needs_human_review: !validation.ok || built.needsHumanReview,
+    review_reason: reasons.length > 0 ? reasons.join(',') : null,
+  },
+}];
 ```
+
+### 2.6 IF: dedupe key derivable?
+
+Condition: `{{$json.dedupeKeyDerivable}}` is `true`.
+
+**FALSE branch — no identity at all, so there is nothing to persist a row
+against:**
+- **Postgres node** — `INSERT INTO lead_events (event_type, status, lead_id, details, error_message) VALUES ('VALIDATION_FAILED', 'FAILURE', NULL, $1, $2)`, `details` built from `validation.errors`. This is the audit model already in use for a pre-lead failure (spec 3.2 — `lead_id` is nullable exactly for this case; `webhookAuth.js`'s own `buildAuthFailureEvent` does the same thing on an auth rejection).
+- **Respond to Webhook** — status `200`.
+
+**TRUE branch (the ordinary case):** continue to the upsert.
 
 ### 2.7 Postgres: Upsert Lead
 
@@ -191,15 +239,16 @@ One parameterized query does the insert-or-merge section 7 describes, and the
 `xmax = 0` column is the standard Postgres idiom for "was this row just
 inserted" — Postgres tags an updated row's `xmax` with the updating
 transaction, while a fresh insert leaves it at `0`. That is what gates
-scoring and the Slack alert: a duplicate never reaches either.
+scoring and the Slack alert: a duplicate never reaches either, and — new in
+this revision — neither does an invalid submission.
 
 ```sql
 INSERT INTO leads (
   source, source_id, first_name, last_name, email, phone, company,
   service_interest, message, budget_raw, budget_amount, budget_currency,
-  timeline, dedupe_key, needs_human_review, review_reason, raw_payload
+  timeline, dedupe_key, crm_status, needs_human_review, review_reason, raw_payload
 ) VALUES (
-  $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17
+  $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18
 )
 ON CONFLICT (dedupe_key) DO UPDATE SET
   first_name       = COALESCE(leads.first_name, EXCLUDED.first_name),
@@ -217,29 +266,49 @@ ON CONFLICT (dedupe_key) DO UPDATE SET
                         ELSE leads.message_history
                       END
   -- Deliberately absent from this SET list: lead_score, lead_temperature,
-  -- crm_status, followup_status, followup_step, next_followup_at. Section 7:
-  -- a duplicate must not be re-scored or have its follow-up sequence
-  -- restarted. This mirrors mockCrm.js/supabaseCrm.js exactly — see
-  -- tests/helpers/crm-contract-suite.js "never overwrites a field that
-  -- already had a value" and "does not re-score the lead".
+  -- crm_status, needs_human_review, review_reason, followup_status,
+  -- followup_step, next_followup_at. Section 7: a duplicate must not be
+  -- re-scored, re-flagged, or have its follow-up sequence restarted — an
+  -- existing lead's crm_status/review state is not overwritten by a later,
+  -- possibly-invalid resubmission either. This mirrors mockCrm.js/
+  -- supabaseCrm.js exactly — see tests/helpers/crm-contract-suite.js "never
+  -- overwrites a field that already had a value" and "does not re-score the
+  -- lead".
 RETURNING *, (xmax = 0) AS inserted;
 ```
 
-Bind `$1..$17` from the Code node's output (`first_name`, `last_name`, …,
-`dedupe_key`, `needs_human_review`, `review_reason`, and `raw_payload` = the
-original webhook body as JSON).
+Bind `$1..$18` from the Code node's output (`first_name`, `last_name`, …,
+`dedupe_key`, `crm_status`, `needs_human_review`, `review_reason`, and
+`raw_payload` = the original webhook body as JSON). `crm_status` is `'NEW'`
+for a valid lead and `'HUMAN_REVIEW'` for an invalid one — computed in step
+2.5, never left to the column default here.
 
 ### 2.8 IF: was this a fresh insert?
 
 Condition: `{{$json.inserted}}` is `true`.
 
-**FALSE branch (duplicate):**
+**FALSE branch (duplicate — same dedupe_key as an existing row):**
 - **Postgres node** — `INSERT INTO lead_events (event_type, status, lead_id, details) VALUES ('DUPLICATE_FOUND', 'SUCCESS', $1, $2)`.
-- **Respond to Webhook** — status `200`, body noting the duplicate. **No scoring node runs. No Slack node runs.** This is the second half of the M4 acceptance test.
+- **IF:** `{{$json.validation.ok}}` is `false` — **also** insert a
+  `VALIDATION_FAILED` / `FAILURE` event against the same `lead_id`, `details`
+  from `validation.errors`. The two facts are independent: this submission
+  was invalid, *and* it turned out to describe someone already on file. Both
+  get recorded; neither is scored and no Slack node runs either way.
+- **Respond to Webhook** — status `200`.
+
+**TRUE branch (fresh row):** continue to 2.9.
+
+### 2.9 IF: was this submission valid?
+
+Condition: `{{$json.validation.ok}}` is `true`.
+
+**FALSE branch — the row now exists, flagged, and stops here:**
+- **Postgres node** — `INSERT INTO lead_events (event_type, status, lead_id, details, error_message) VALUES ('VALIDATION_FAILED', 'FAILURE', $1, $2, $3)`, `lead_id` from the upsert's `RETURNING`, `details` from `validation.errors`.
+- **Respond to Webhook** — status `200`. **No scoring node runs. No Slack node runs. No follow-up is started** — `followup_status` stays at its schema default `PENDING` and `next_followup_at` stays `NULL`, so the M6 scheduler's due-query (`followup_status = 'IN_PROGRESS'`) never picks this row up until a person clears the review and starts it deliberately.
 
 **TRUE branch:** continue to scoring.
 
-### 2.9 Code: Build Scoring Prompt
+### 2.10 Code: Build Scoring Prompt
 
 Paste **`dist/nodes/sanitize.js`** then **`dist/nodes/prompt.js`**, then:
 
@@ -251,7 +320,7 @@ const built = buildScoringPrompt({ ...lead, message: prepared.value });
 return [{ json: { ...lead, sanitized: prepared, systemPrompt: built.systemPrompt, userPrompt: built.userPrompt } }];
 ```
 
-### 2.10 HTTP Request: Ollama
+### 2.11 HTTP Request: Ollama
 
 - **Method:** POST
 - **URL:** `{{$env.OLLAMA_BASE_URL}}/api/chat`
@@ -271,7 +340,7 @@ return [{ json: { ...lead, sanitized: prepared, systemPrompt: built.systemPrompt
 - **Timeout:** `{{$env.LLM_TIMEOUT_MS}}` — a hung Ollama call must not hold the
   execution open indefinitely (mirrors `src/adapters/llm/ollamaLlm.js`).
 
-### 2.11 Code: Parse Score
+### 2.12 Code: Parse Score
 
 Paste **`dist/nodes/scoreParse.js`** then **`dist/nodes/temperature.js`**, then:
 
@@ -284,7 +353,7 @@ if (parsed.ok) {
   const temperature = scoreToTemperature(parsed.value.score, thresholdsFromEnv({ HOT_SCORE_THRESHOLD: $env.HOT_SCORE_THRESHOLD }));
   output.patch = buildScorePatch(parsed.value, {
     temperature,
-    existingReviewReason: $('Build Dedupe Key').first().json.review_reason,
+    existingReviewReason: $('Build Dedupe Key + Review Patch').first().json.review_reason,
   });
 } else {
   output.error = parsed.error;
@@ -293,21 +362,21 @@ if (parsed.ok) {
 return [{ json: output }];
 ```
 
-### 2.12 IF: parsed ok?
+### 2.13 IF: parsed ok?
 
 Condition: `{{$json.ok}}` is `true`.
 
 **FALSE branch — the one retry section 5.3 allows:**
 - **Code node**, pasting `prompt.js` again, calling `buildScoringPrompt(lead, { strict: true })` to get `STRICT_RETRY_REMINDER` appended.
-- **HTTP Request** — same Ollama call as 2.10, with the strict prompt.
-- **Code node** — same parse as 2.11.
+- **HTTP Request** — same Ollama call as 2.11, with the strict prompt.
+- **Code node** — same parse as 2.12.
 - **IF: parsed ok? (second attempt)**
   - **FALSE:** paste `scoreParse.js`, call `buildScoreFailurePatch({ reason: 'invalid_response' })`. This is where **AI_SCORE_INVALID** gets logged and `crm_status` becomes `HUMAN_REVIEW` — the lead still persists (spec 5.3's core guarantee).
   - **TRUE:** join the success path below.
 
 **TRUE branch:** continue directly.
 
-### 2.13 Postgres: Apply Score
+### 2.14 Postgres: Apply Score
 
 ```sql
 UPDATE leads SET
@@ -318,13 +387,13 @@ WHERE lead_id = $8
 RETURNING *;
 ```
 
-Bind from the patch object built in 2.11/2.12 (`buildScorePatch` or
+Bind from the patch object built in 2.12/2.13 (`buildScorePatch` or
 `buildScoreFailurePatch`) plus the `lead_id` from the upsert step (2.7).
 
 Follow with a Postgres insert logging **AI_SCORE_CREATED** (success path) or
 **AI_SCORE_INVALID** (failure path), `status` `SUCCESS`/`FAILURE` to match.
 
-### 2.14 IF: HOT?
+### 2.15 IF: HOT?
 
 Condition: `{{$json.lead_temperature}}` equals `HOT`.
 
@@ -351,7 +420,7 @@ false without an extra check).
 ## 3. Concatenating snippets in one Code node
 
 n8n's Code node runs one JS file, so a step needing more than one core module
-(2.4, 2.9, 2.11) needs its snippets pasted **in sequence, top to bottom**,
+(2.4, 2.10, 2.12) needs its snippets pasted **in sequence, top to bottom**,
 before the node-specific logic at the end. This is safe only because every
 `dist/nodes/*.js` file is independently self-contained with zero cross-core
 imports (`tests/build-nodes.test.js` proves every module transforms with no
@@ -400,6 +469,32 @@ should produce the row/score/Slack-log the acceptance test checks for; firing
 the exact same `curl` command again should produce a `DUPLICATE_FOUND` log
 entry and nothing else.
 
+### 5.1 Test curl command — an invalid submission (scenario 7)
+
+```bash
+curl -i -X POST http://localhost:5678/webhook/lead-intake \
+  -H "Content-Type: application/json" \
+  -H "X-Lead-Token: $WEBHOOK_SECRET" \
+  -d '{
+    "email": "not-an-email",
+    "first_name": "Grace",
+    "message": "Interested in your services."
+  }'
+```
+
+No phone, and an email that fails format validation — `validateLead` rejects
+it on both `email` (`INVALID_FORMAT`) and `contact` (`NO_CONTACT_METHOD`, since
+an invalid email does not count as a usable one). It is still a non-empty
+string though, so `buildDedupeKey` uses it as-is (`email:not-an-email`) —
+dedupe key derivation only cares whether a field is *present*, never whether
+it is *valid* (spec 7 defines precedence, not format). Confirm: one new row
+in `leads` with `crm_status = 'HUMAN_REVIEW'`, `needs_human_review = true`,
+`review_reason` containing `validation_failed:email,contact`, and
+`lead_score`/`lead_temperature` both `NULL` — no scoring ever ran. `lead_events`
+gets one `VALIDATION_FAILED` row against that `lead_id`. No `SLACK_ALERT_SENT`
+row is written at all, `DRY_RUN` or not — the HOT-check never runs for a lead
+that was never scored.
+
 ---
 
 ## Running the acceptance test
@@ -418,6 +513,11 @@ entry and nothing else.
    lead_id = '<id>' ORDER BY created_at`) — this is the screenshot section 11
    asks for, and the sequence should read cleanly: `CRM_CREATED` →
    `AI_SCORE_CREATED` → `SLACK_ALERT_SENT` → `DUPLICATE_FOUND`.
+4. Run the [invalid-submission `curl` command](#51-test-curl-command--an-invalid-submission-scenario-7)
+   once. Confirm: one new row, `crm_status = 'HUMAN_REVIEW'`,
+   `lead_score IS NULL`, and exactly one `VALIDATION_FAILED` row in
+   `lead_events` — no `AI_SCORE_CREATED`, no `SLACK_ALERT_SENT`, either way.
+   The lead was never dropped (scenario 7, section 10).
 
 If any of this diverges, the mismatch is almost always in the wiring, not the
 snippets — every `dist/nodes/*.js` file has unit and behavioural-fidelity
