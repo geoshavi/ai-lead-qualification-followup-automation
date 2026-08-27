@@ -15,6 +15,10 @@ coverage/
 *.log
 npm-debug.log*
 
+# Graphify local repo graph (agent-side developer tooling, spec section 13.1 —
+# never a runtime dependency, never read as part of the product)
+graphify-out/
+
 # OS / editor cruft
 .DS_Store
 Thumbs.db
