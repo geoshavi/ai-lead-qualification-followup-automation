@@ -1,5 +1,7 @@
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import {
   normalizeWhitespace,
   normalizeEmail,
@@ -9,9 +11,16 @@ import {
   parseBudget,
   toCanonicalFields,
   mapWebsitePayload,
+  mapMetaPayload,
+  parseFromHeader,
+  extractEmailBodyFields,
+  mapEmailPayload,
   normalizeLead,
   supportedSources,
 } from '../src/core/normalize.js';
+
+const FIXTURES = join(import.meta.dirname, '..', 'fixtures', 'sources');
+const fixture = (name) => JSON.parse(readFileSync(join(FIXTURES, `${name}.json`), 'utf8'));
 
 describe('whitespace and email normalisation', () => {
   test('collapses internal whitespace and trims', () => {
@@ -260,16 +269,15 @@ describe('normalizeLead', () => {
     assert.equal(fields.last_name, 'Lovelace');
   });
 
-  test('an unimplemented source fails loudly rather than half-populating a lead', () => {
-    // Meta and inbound email arrive at M5. Until then they must not silently
-    // produce an empty lead that looks successful in the audit log.
-    assert.throws(() => normalizeLead('meta', {}), /no mapper for source "meta"/);
-    assert.throws(() => normalizeLead('email', {}), /no mapper for source "email"/);
+  test('an unsupported source still fails loudly rather than half-populating a lead', () => {
+    // meta and email shipped at M5 (spec 9). A source outside the three the
+    // schema's CHECK constraint allows must still refuse rather than silently
+    // producing an empty lead that looks successful in the audit log.
     assert.throws(() => normalizeLead('carrier-pigeon', {}), /no mapper/);
   });
 
   test('reports which sources it supports', () => {
-    assert.deepEqual(supportedSources(), ['website']);
+    assert.deepEqual(supportedSources(), ['website', 'meta', 'email']);
   });
 });
 
@@ -310,6 +318,284 @@ describe('normalisation is shape-agnostic (spec 5 / M5 groundwork)', () => {
     for (const p of parsed) {
       assert.equal(p.budget_amount, 12000, 'three spellings, one parsed amount');
       assert.equal(p.budget_currency, 'USD');
+    }
+  });
+});
+
+describe('meta lead ads payload mapping (spec 9, M5)', () => {
+  test('maps field_data entries by name into canonical concepts', () => {
+    const mapped = mapMetaPayload({
+      id: 'LG-1',
+      field_data: [
+        { name: 'full_name', values: ['Ada Lovelace'] },
+        { name: 'email', values: ['ada@example.com'] },
+        { name: 'phone_number', values: ['+14155550100'] },
+        { name: 'company_name', values: ['Analytical Engines'] },
+        { name: 'estimated_budget', values: ['$12,000'] },
+      ],
+    });
+    assert.equal(mapped.source, 'meta');
+    assert.equal(mapped.source_id, 'LG-1');
+    assert.equal(mapped.full_name, 'Ada Lovelace');
+    assert.equal(mapped.email, 'ada@example.com');
+    assert.equal(mapped.phone, '+14155550100');
+    assert.equal(mapped.company, 'Analytical Engines');
+    assert.equal(mapped.budget_raw, '$12,000');
+  });
+
+  test('accepts separate first_name/last_name fields instead of a combined name', () => {
+    const mapped = mapMetaPayload({
+      field_data: [
+        { name: 'first_name', values: ['Ada'] },
+        { name: 'last_name', values: ['Lovelace'] },
+      ],
+    });
+    assert.equal(mapped.full_name, null);
+    assert.equal(mapped.first_name, 'Ada');
+    assert.equal(mapped.last_name, 'Lovelace');
+  });
+
+  test('accepts field-name aliases, since advertisers name custom questions freely', () => {
+    const aliases = [
+      [{ name: 'what_service_are_you_interested_in', values: ['Automation'] }, 'service_interest', 'Automation'],
+      [{ name: 'when_are_you_looking_to_start', values: ['Q3'] }, 'timeline', 'Q3'],
+      [{ name: 'additional_details', values: ['hello'] }, 'message', 'hello'],
+    ];
+    for (const [entry, field, expected] of aliases) {
+      const mapped = mapMetaPayload({ field_data: [entry] });
+      assert.equal(mapped[field], expected, `alias for ${field}`);
+    }
+  });
+
+  test('field names are matched case-insensitively', () => {
+    const mapped = mapMetaPayload({ field_data: [{ name: 'EMAIL', values: ['a@b.com'] }] });
+    assert.equal(mapped.email, 'a@b.com');
+  });
+
+  test('an empty payload does not throw', () => {
+    const mapped = mapMetaPayload({});
+    assert.equal(mapped.source, 'meta');
+    assert.equal(mapped.email, null);
+  });
+
+  test('a payload with no field_data array does not throw', () => {
+    const mapped = mapMetaPayload({ id: 'LG-2' });
+    assert.equal(mapped.source_id, 'LG-2');
+    assert.equal(mapped.email, null);
+  });
+});
+
+describe('inbound email parsing (spec 9, M5)', () => {
+  describe('parseFromHeader', () => {
+    test('extracts a display name and address from "Name <email>"', () => {
+      assert.deepEqual(parseFromHeader('Ada Lovelace <ada@example.com>'), {
+        full_name: 'Ada Lovelace',
+        email: 'ada@example.com',
+      });
+    });
+
+    test('handles a quoted display name', () => {
+      assert.deepEqual(parseFromHeader('"Lovelace, Ada" <ada@example.com>'), {
+        full_name: 'Lovelace, Ada',
+        email: 'ada@example.com',
+      });
+    });
+
+    test('falls back to a bare address with no display name', () => {
+      assert.deepEqual(parseFromHeader('ada@example.com'), { full_name: null, email: 'ada@example.com' });
+    });
+
+    test('non-string or empty input yields two nulls', () => {
+      assert.deepEqual(parseFromHeader(null), { full_name: null, email: null });
+      assert.deepEqual(parseFromHeader(''), { full_name: null, email: null });
+    });
+  });
+
+  describe('extractEmailBodyFields', () => {
+    test('pulls recognised "Label: value" lines out of the body', () => {
+      const body = 'Phone: 415-555-0100\nCompany: Analytical Engines\nBudget: $12k\nTimeline: Next month';
+      const fields = extractEmailBodyFields(body);
+      assert.equal(fields.phone, '415-555-0100');
+      assert.equal(fields.company, 'Analytical Engines');
+      assert.equal(fields.budget_raw, '$12k');
+      assert.equal(fields.timeline, 'Next month');
+    });
+
+    test('everything not a recognised label survives as the message', () => {
+      const body = 'Hi,\n\nWe need help automating lead routing.\n\nThanks,\nAda';
+      const fields = extractEmailBodyFields(body);
+      assert.equal(fields.message, 'Hi, We need help automating lead routing. Thanks, Ada');
+    });
+
+    test('label matching is case-insensitive and alias-aware', () => {
+      assert.equal(extractEmailBodyFields('PHONE: 415-555-0100').phone, '415-555-0100');
+      assert.equal(extractEmailBodyFields('Organisation: Acme').company, 'Acme');
+      assert.equal(extractEmailBodyFields('Interested in: Automation').service_interest, 'Automation');
+    });
+
+    test('non-string or empty input does not throw', () => {
+      assert.deepEqual(extractEmailBodyFields(null), { message: null });
+      assert.deepEqual(extractEmailBodyFields(''), { message: null });
+    });
+  });
+
+  describe('mapEmailPayload', () => {
+    test('maps the from header and recognised body labels', () => {
+      const mapped = mapEmailPayload({
+        message_id: 'MSG-1',
+        from: 'Ada Lovelace <ada@example.com>',
+        text: 'Company: Analytical Engines\n\nWe need help automating lead routing.',
+      });
+      assert.equal(mapped.source, 'email');
+      assert.equal(mapped.source_id, 'MSG-1');
+      assert.equal(mapped.full_name, 'Ada Lovelace');
+      assert.equal(mapped.email, 'ada@example.com');
+      assert.equal(mapped.company, 'Analytical Engines');
+      assert.equal(mapped.message, 'We need help automating lead routing.');
+    });
+
+    test('accepts common inbound-parse field aliases for the body', () => {
+      assert.equal(mapEmailPayload({ body: 'hello' }).message, 'hello');
+      assert.equal(mapEmailPayload({ 'body-plain': 'hello' }).message, 'hello');
+      assert.equal(mapEmailPayload({ sender: 'a@b.com' }).email, 'a@b.com');
+    });
+
+    test('an empty payload does not throw', () => {
+      const mapped = mapEmailPayload({});
+      assert.equal(mapped.source, 'email');
+      assert.equal(mapped.email, null);
+      assert.equal(mapped.message, null);
+    });
+  });
+});
+
+describe('normalizeLead accepts meta and email now that M5 has shipped', () => {
+  test('produces canonical fields for a meta lead ads submission', () => {
+    const { fields, rawMessage } = normalizeLead('meta', {
+      id: 'LG-9',
+      field_data: [
+        { name: 'full_name', values: ['Ada Lovelace'] },
+        { name: 'email', values: ['ADA@Example.com'] },
+        { name: 'phone_number', values: ['(415) 555-0100'] },
+        { name: 'company_name', values: ['Analytical Engines'] },
+        { name: 'what_service_are_you_interested_in', values: ['Automation'] },
+        { name: 'estimated_budget', values: ['$12,000'] },
+        { name: 'when_are_you_looking_to_start', values: ['Next month'] },
+        { name: 'additional_details', values: ['We need help.'] },
+      ],
+    });
+
+    assert.deepEqual(fields, {
+      source: 'meta',
+      source_id: 'LG-9',
+      first_name: 'Ada',
+      last_name: 'Lovelace',
+      email: 'ada@example.com',
+      phone: '+14155550100',
+      company: 'Analytical Engines',
+      service_interest: 'Automation',
+      timeline: 'Next month',
+      budget_raw: '$12,000',
+      budget_amount: 12000,
+      budget_currency: 'USD',
+    });
+    assert.equal(rawMessage, 'We need help.');
+  });
+
+  test('produces canonical fields for an inbound email submission', () => {
+    const { fields, rawMessage } = normalizeLead('email', {
+      message_id: 'MSG-9',
+      from: 'Ada Lovelace <ADA@Example.com>',
+      text: 'Phone: (415) 555-0100\nCompany: Analytical Engines\nService: Automation\nBudget: $12,000\nTimeline: Next month\n\nWe need help.',
+    });
+
+    assert.deepEqual(fields, {
+      source: 'email',
+      source_id: 'MSG-9',
+      first_name: 'Ada',
+      last_name: 'Lovelace',
+      email: 'ada@example.com',
+      phone: '+14155550100',
+      company: 'Analytical Engines',
+      service_interest: 'Automation',
+      timeline: 'Next month',
+      budget_raw: '$12,000',
+      budget_amount: 12000,
+      budget_currency: 'USD',
+    });
+    assert.equal(rawMessage, 'We need help.');
+  });
+});
+
+describe('M5 acceptance test, verbatim (spec 9): three payload shapes, one person', () => {
+  // "three different payload shapes produce byte-identical canonical output
+  // for the same underlying person." website/meta/email deliberately use
+  // different field vocabularies, different phone/budget spellings, and
+  // (website+email vs. meta) a combined name vs. separate first/last fields —
+  // the same coverage the M1 groundwork test gave a single source shape,
+  // now proven across all three real source mappers via the fixtures spec 9
+  // asks for ("fixtures for each").
+  const results = {
+    website: normalizeLead('website', fixture('website')),
+    meta: normalizeLead('meta', fixture('meta')),
+    email: normalizeLead('email', fixture('email')),
+  };
+
+  test('source and source_id are preserved per-channel, not merged away', () => {
+    assert.equal(results.website.fields.source, 'website');
+    assert.equal(results.meta.fields.source, 'meta');
+    assert.equal(results.email.fields.source, 'email');
+    // Each channel's own identifier — these are legitimately different per
+    // source and are exactly what lets dedupe.js fall through to email-based
+    // matching (spec 7 precedence) to recognise this as one returning person.
+    assert.equal(results.website.fields.source_id, 'WEB-2201');
+    assert.equal(results.meta.fields.source_id, '120211999888777');
+    assert.equal(results.email.fields.source_id, '<CAF=abc123@mail.example.com>');
+  });
+
+  test('every other canonical field is byte-identical across all three shapes', () => {
+    // budget_raw is excluded for the same reason the M1 groundwork test
+    // excludes it: spec 3.1 defines it as "as submitted", so three different
+    // spellings of the same figure is correct behaviour, not drift.
+    const comparable = Object.entries(results).map(([sourceName, { fields }]) => {
+      const { source, source_id, budget_raw, ...rest } = fields;
+      return [sourceName, JSON.stringify(rest)];
+    });
+
+    const distinct = new Set(comparable.map(([, json]) => json));
+    assert.equal(
+      distinct.size,
+      1,
+      `expected byte-identical canonical output, got:\n${comparable.map(([n, j]) => `${n}: ${j}`).join('\n')}`,
+    );
+
+    assert.deepEqual(comparable[0][1] && JSON.parse(comparable[0][1]), {
+      first_name: 'Ada',
+      last_name: 'Lovelace',
+      email: 'ada@example.com',
+      phone: '+14155550100',
+      company: 'Analytical Engines',
+      service_interest: 'Workflow automation',
+      timeline: 'Next month',
+      budget_amount: 12000,
+      budget_currency: 'USD',
+    });
+  });
+
+  test('budget wording differs per channel while the parsed amount converges', () => {
+    assert.deepEqual(
+      {
+        website: results.website.fields.budget_raw,
+        meta: results.meta.fields.budget_raw,
+        email: results.email.fields.budget_raw,
+      },
+      { website: '$12,000', meta: '12000', email: '$12k' },
+      'three spellings of the same figure must survive untouched',
+    );
+
+    for (const { fields } of Object.values(results)) {
+      assert.equal(fields.budget_amount, 12000);
+      assert.equal(fields.budget_currency, 'USD');
     }
   });
 });

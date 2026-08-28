@@ -244,15 +244,175 @@ function mapWebsitePayload(payload) {
 }
 
 /**
- * Source mappers.
- *
- * M4 ships the website slice. Meta lead ads and inbound email parsing are M5
- * and are deliberately absent rather than stubbed with guesswork — an
- * unimplemented source must fail loudly, not quietly produce a half-populated
- * lead that looks successful in the audit log.
+ * Meta lead ads: the Graph API "retrieved lead" shape — a flat envelope plus
+ * `field_data`, an array of `{name, values: [...]}` pairs. `name` is whatever
+ * the advertiser called the question when building the form, so it is matched
+ * against a generous alias list the same way mapWebsitePayload aliases renamed
+ * form fields — the failure mode (a real answer silently becoming null) is
+ * identical.
  */
+const META_FIELD_ALIASES = Object.freeze({
+  full_name: ['full_name', 'name'],
+  first_name: ['first_name'],
+  last_name: ['last_name'],
+  email: ['email'],
+  phone: ['phone_number', 'phone'],
+  company: ['company_name', 'company'],
+  service_interest: ['what_service_are_you_interested_in', 'service_interest', 'service', 'interested_in'],
+  message: ['additional_details', 'message', 'comments', 'tell_us_more'],
+  budget_raw: ['estimated_budget', 'budget', 'budget_range'],
+  timeline: ['when_are_you_looking_to_start', 'timeline', 'timeframe'],
+});
+
+/** `{name, values: [...]}[]` -> a lookup from lowercased name to its first value. */
+function indexFieldData(fieldData) {
+  const byName = new Map();
+  if (!Array.isArray(fieldData)) return byName;
+
+  for (const entry of fieldData) {
+    const name = typeof entry?.name === 'string' ? entry.name.trim().toLowerCase() : null;
+    if (name === null || byName.has(name)) continue;
+
+    const value = Array.isArray(entry?.values) ? entry.values[0] : undefined;
+    if (value !== undefined) byName.set(name, value);
+  }
+  return byName;
+}
+
+/**
+ * Meta lead ads webhook/API payload.
+ *
+ * @param {{id?: string, leadgen_id?: string, field_data?: Array<{name: string, values: unknown[]}>}} payload
+ */
+function mapMetaPayload(payload) {
+  const p = payload ?? {};
+  const byName = indexFieldData(p.field_data);
+
+  const pick = (concept) => {
+    for (const alias of META_FIELD_ALIASES[concept]) {
+      if (byName.has(alias)) return byName.get(alias);
+    }
+    return null;
+  };
+
+  return {
+    source: 'meta',
+    source_id: p.id ?? p.leadgen_id ?? null,
+    full_name: pick('full_name'),
+    first_name: pick('first_name'),
+    last_name: pick('last_name'),
+    email: pick('email'),
+    phone: pick('phone'),
+    company: pick('company'),
+    service_interest: pick('service_interest'),
+    message: pick('message'),
+    budget_raw: pick('budget_raw'),
+    timeline: pick('timeline'),
+  };
+}
+
+/**
+ * Extract a display name and address from an RFC 5322 "From" header, e.g.
+ * `"Ada Lovelace" <ada@example.com>`, `Ada Lovelace <ada@example.com>`, or a
+ * bare `ada@example.com`.
+ *
+ * @param {unknown} raw
+ * @returns {{full_name: string|null, email: string|null}}
+ */
+function parseFromHeader(raw) {
+  if (typeof raw !== 'string') return { full_name: null, email: null };
+
+  const trimmed = raw.trim();
+  if (trimmed === '') return { full_name: null, email: null };
+
+  const match = trimmed.match(/^"?([^"<]*?)"?\s*<([^>]+)>$/);
+  if (match) {
+    return { full_name: normalizeWhitespace(match[1]), email: match[2].trim() };
+  }
+  return { full_name: null, email: trimmed };
+}
+
+/** `extractEmailBodyFields`'s recognised labels, longest-match-agnostic since each is a whole line's key. */
+const EMAIL_LABEL_ALIASES = Object.freeze({
+  phone: ['phone', 'phone number', 'tel'],
+  company: ['company', 'company name', 'organisation', 'organization'],
+  service_interest: ['service', 'service interest', 'interested in'],
+  budget_raw: ['budget', 'budget range'],
+  timeline: ['timeline', 'timeframe', 'when'],
+});
+
+const EMAIL_LABEL_LOOKUP = new Map(
+  Object.entries(EMAIL_LABEL_ALIASES).flatMap(([field, aliases]) => aliases.map((alias) => [alias, field])),
+);
+
+const LABEL_LINE = /^([A-Za-z][A-Za-z ]{1,30}):[ \t]*(.+)$/;
+
+/**
+ * Split an inbound email body into recognised "Label: value" lines and the
+ * remaining free text.
+ *
+ * A lead-capture inbox is often a semi-structured template, not raw prose —
+ * but nothing requires it to be, so an unlabelled line is never dropped: it
+ * survives in `message`, unsanitised, for sanitize.js and the model to read
+ * exactly like any other source's message.
+ *
+ * @param {unknown} text
+ * @returns {{message: string|null, phone?: string, company?: string, service_interest?: string, budget_raw?: string, timeline?: string}}
+ */
+function extractEmailBodyFields(text) {
+  if (typeof text !== 'string') return { message: null };
+
+  const structured = {};
+  const remaining = [];
+
+  for (const line of text.split(/\r?\n/)) {
+    const match = line.match(LABEL_LINE);
+    const field = match ? EMAIL_LABEL_LOOKUP.get(match[1].trim().toLowerCase()) : undefined;
+
+    if (field !== undefined && structured[field] === undefined) {
+      structured[field] = match[2].trim();
+    } else {
+      remaining.push(line);
+    }
+  }
+
+  return { ...structured, message: normalizeWhitespace(remaining.join(' ')) };
+}
+
+/**
+ * Inbound email, as a generic parsed-envelope webhook (SendGrid Inbound
+ * Parse / Mailgun / Postmark all agree on this rough shape, modulo field
+ * names). Field aliases cover the common provider variants; body-label
+ * extraction is what stands in for a source-specific "phone" field that a
+ * plain email has no header for.
+ */
+function mapEmailPayload(payload) {
+  const p = payload ?? {};
+  const from = parseFromHeader(p.from ?? p.sender ?? p.from_email ?? null);
+  const bodyText = p.text ?? p.body ?? p['body-plain'] ?? p['stripped-text'] ?? p.TextBody ?? null;
+  const body = extractEmailBodyFields(bodyText);
+
+  return {
+    source: 'email',
+    source_id: p.message_id ?? p.messageId ?? p.id ?? null,
+    full_name: from.full_name,
+    first_name: null,
+    last_name: null,
+    email: from.email,
+    phone: body.phone ?? null,
+    company: body.company ?? null,
+    service_interest: body.service_interest ?? null,
+    message: body.message,
+    budget_raw: body.budget_raw ?? null,
+    timeline: body.timeline ?? null,
+  };
+}
+
+/** Source mappers. One entry per value the `source` CHECK constraint allows (spec 3.1). */
 const SOURCE_MAPPERS = Object.freeze({
   website: mapWebsitePayload,
+  meta: mapMetaPayload,
+  email: mapEmailPayload,
 });
 
 /** Sources this module can currently normalise. */

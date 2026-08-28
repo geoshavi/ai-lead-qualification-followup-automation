@@ -7,20 +7,21 @@ deterministic follow-up sequence that stops when it should. Duplicate submission
 cannot create duplicate rows or duplicate messages — that guarantee is enforced by
 the database, not by workflow logic.
 
-> **Status: M4 (vertical slice) complete.** The website-intake canvas — webhook
-> auth → normalize → validate → dedupe/upsert → AI score → persist → Slack if
-> HOT — is built by hand in n8n from the generated `dist/nodes/` snippets and
-> `docs/workflow.md`'s node-by-node guide, and the acceptance test has passed:
-> one real submission produced one row, one score and one Slack alert, and
-> resubmitting the identical payload produced zero new rows and zero new
-> messages (`DRY_RUN` restored to `true` afterward). 580 tests, 579 passing, 1
-> skipped (the M2 hosted-parity marker, which only runs when a
-> Postgres/PostgREST endpoint is configured) — the suite still makes no
-> network call. The accepted run used `anthropicLlm.js` as the optional,
-> config-only hosted provider for this demo pass; `ollamaLlm.js` remains the
-> $0 default and local fallback (spec 5.0). Remaining lead sources begin at
-> M5. See `PROJECT_SPEC.md` §9 for the full milestone plan. This README is
-> expanded into full documentation at M9.
+> **Status: M5 (remaining sources) complete.** `normalize.js` now maps all
+> three sources the schema allows — website, Meta lead ads (`field_data`
+> name/value pairs, alias-matched since advertisers name questions freely),
+> and inbound email (`From`-header parsing plus a small "Label: value"
+> body-line extractor for phone/company/service/budget/timeline, everything
+> unlabelled left in `message` for sanitize.js and the model to read). Fixed
+> fixtures for each live in `fixtures/sources/`; the M5 acceptance test loads
+> all three and asserts byte-identical canonical output for the same person,
+> per spec §9. 602 tests, 601 passing, 1 skipped (the M2 hosted-parity
+> marker, which only runs when a Postgres/PostgREST endpoint is configured) —
+> the suite still makes no network call. The website vertical slice remains
+> the only source wired into a live n8n canvas (M4); wiring Meta/email intake
+> into the canvas is unstarted and not part of M5's "done when". See
+> `PROJECT_SPEC.md` §9 for the full milestone plan. This README is expanded
+> into full documentation at M9.
 
 ---
 

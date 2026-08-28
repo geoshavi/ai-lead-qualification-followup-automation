@@ -1,0 +1,7 @@
+{
+  "message_id": "<CAF=abc123@mail.example.com>",
+  "from": "Ada Lovelace <ada@example.com>",
+  "to": "leads@ourcompany.example.com",
+  "subject": "Automation inquiry",
+  "text": "Hi,\n\nPhone: 415-555-0100\nCompany: Analytical Engines\nService: Workflow automation\nBudget: $12k\nTimeline: Next month\n\nWe need help automating lead routing before our launch.\n\nThanks,\nAda"
+}
