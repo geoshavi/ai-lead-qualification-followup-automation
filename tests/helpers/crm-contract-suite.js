@@ -508,6 +508,83 @@ export function runCrmContractSuite(config) {
     });
 
     // -----------------------------------------------------------------------
+    // claimNotification — the idempotency guard, spec 3.3 / M6
+    // -----------------------------------------------------------------------
+    describe('claimNotification', () => {
+      test('the first claim for a (lead, kind, step) succeeds', async () => {
+        const { leadId } = await crm.upsertLead(leadFixture());
+        const result = await crm.claimNotification({ leadId, kind: 'FOLLOWUP', step: 0 });
+
+        assert.equal(result.claimed, true);
+        assert.match(result.notification.id, UUID_RE);
+        assert.equal(result.notification.lead_id, leadId);
+        assert.equal(result.notification.kind, 'FOLLOWUP');
+        assert.equal(result.notification.step, 0);
+        assert.match(result.notification.sent_at, ISO_UTC_RE);
+      });
+
+      test('a second claim for the same (lead, kind, step) is refused, not overwritten', async () => {
+        const { leadId } = await crm.upsertLead(leadFixture());
+        const first = await crm.claimNotification({ leadId, kind: 'FOLLOWUP', step: 0 });
+        const second = await crm.claimNotification({ leadId, kind: 'FOLLOWUP', step: 0 });
+
+        assert.equal(second.claimed, false);
+        // Reads back the ORIGINAL claim, proving nothing was overwritten.
+        assert.equal(second.notification.id, first.notification.id);
+        assert.equal(second.notification.sent_at, first.notification.sent_at);
+      });
+
+      test('the same step is claimable again under a different kind', async () => {
+        const { leadId } = await crm.upsertLead(leadFixture());
+        await crm.claimNotification({ leadId, kind: 'FOLLOWUP', step: 0 });
+        const other = await crm.claimNotification({ leadId, kind: 'BOOKING_CONFIRM', step: 0 });
+
+        assert.equal(other.claimed, true);
+      });
+
+      test('the same kind is claimable again under a different step', async () => {
+        const { leadId } = await crm.upsertLead(leadFixture());
+        await crm.claimNotification({ leadId, kind: 'FOLLOWUP', step: 0 });
+        const nextStep = await crm.claimNotification({ leadId, kind: 'FOLLOWUP', step: 1 });
+
+        assert.equal(nextStep.claimed, true);
+      });
+
+      test('the same (kind, step) is claimable again for a different lead', async () => {
+        const a = await crm.upsertLead(leadFixture({ dedupe_key: 'email:a@example.com', email: 'a@example.com' }));
+        const b = await crm.upsertLead(leadFixture({ dedupe_key: 'email:b@example.com', email: 'b@example.com' }));
+
+        await crm.claimNotification({ leadId: a.leadId, kind: 'FOLLOWUP', step: 0 });
+        const claim = await crm.claimNotification({ leadId: b.leadId, kind: 'FOLLOWUP', step: 0 });
+
+        assert.equal(claim.claimed, true);
+      });
+
+      test('rejects a kind outside the notifications enumeration', async () => {
+        const { leadId } = await crm.upsertLead(leadFixture());
+        await assert.rejects(
+          () => crm.claimNotification({ leadId, kind: 'CARRIER_PIGEON', step: 0 }),
+          /kind/,
+        );
+      });
+
+      test('rejects a negative or non-integer step', async () => {
+        const { leadId } = await crm.upsertLead(leadFixture());
+        await assert.rejects(() => crm.claimNotification({ leadId, kind: 'FOLLOWUP', step: -1 }), /step/);
+        await assert.rejects(() => crm.claimNotification({ leadId, kind: 'FOLLOWUP', step: 1.5 }), /step/);
+      });
+
+      test('does not write a lead_events row of its own — the caller logs FOLLOWUP_SENT separately', async () => {
+        const { leadId } = await crm.upsertLead(leadFixture());
+        const before = await crm.listEvents({ leadId });
+        await crm.claimNotification({ leadId, kind: 'FOLLOWUP', step: 0 });
+        const after = await crm.listEvents({ leadId });
+
+        assert.equal(after.length, before.length);
+      });
+    });
+
+    // -----------------------------------------------------------------------
     // Row shape — the parity that lets one suite cover two stores
     // -----------------------------------------------------------------------
     describe('row shape', () => {

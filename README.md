@@ -7,19 +7,24 @@ deterministic follow-up sequence that stops when it should. Duplicate submission
 cannot create duplicate rows or duplicate messages — that guarantee is enforced by
 the database, not by workflow logic.
 
-> **Status: M5 (remaining sources) complete.** `normalize.js` now maps all
-> three sources the schema allows — website, Meta lead ads (`field_data`
-> name/value pairs, alias-matched since advertisers name questions freely),
-> and inbound email (`From`-header parsing plus a small "Label: value"
-> body-line extractor for phone/company/service/budget/timeline, everything
-> unlabelled left in `message` for sanitize.js and the model to read). Fixed
-> fixtures for each live in `fixtures/sources/`; the M5 acceptance test loads
-> all three and asserts byte-identical canonical output for the same person,
-> per spec §9. 602 tests, 601 passing, 1 skipped (the M2 hosted-parity
-> marker, which only runs when a Postgres/PostgREST endpoint is configured) —
-> the suite still makes no network call. The website vertical slice remains
-> the only source wired into a live n8n canvas (M4); wiring Meta/email intake
-> into the canvas is unstarted and not part of M5's "done when". See
+> **Status: M6 (scheduler) complete.** The follow-up engine's deterministic
+> half (`followup.js`, cadence and stop conditions) shipped at M1; M6 adds
+> what only touches the database — `claimNotification` on both CRM adapters,
+> the `UNIQUE (lead_id, kind, step)` idempotency guard from spec 3.3 made
+> real — and what only touches the model — `followupPrompt.js`, the same
+> fenced-delimiter prompt discipline as scoring, applied to writing follow-up
+> wording (spec 6.4). `docs/scheduler.md` is the node-by-node guide for the
+> second, separate n8n workflow spec 6.1 requires (no `Wait` node: a cron
+> trigger polls `next_followup_at`, state stays in Postgres). The literal M6
+> acceptance sentence — a seeded lead advances exactly one step per run and
+> stops correctly at every stop condition — is proven directly in
+> `tests/scheduler.test.js` against `mockCrm` with a frozen clock; unlike M4,
+> spec 9 assigns this milestone no live-canvas/curl deliverable. 640 tests,
+> 639 passing, 1 skipped (the M2 hosted-parity marker, which only runs when a
+> Postgres/PostgREST endpoint is configured) — the suite still makes no
+> network call. Building the scheduler canvas itself in n8n, and confirming
+> it reproduces that same result against a real Postgres, remain manual steps
+> — see `docs/scheduler.md`'s own acceptance-test walkthrough. See
 > `PROJECT_SPEC.md` §9 for the full milestone plan. This README is expanded
 > into full documentation at M9.
 

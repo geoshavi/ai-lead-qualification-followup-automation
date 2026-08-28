@@ -173,4 +173,21 @@ describe('concurrent callers in one process do not lose writes', () => {
     const events = await crm.listEvents({ leadId, eventType: 'CRM_UPDATED' });
     assert.equal(events.length, 10);
   });
+
+  test('twenty concurrent claims for the same (lead, kind, step) yield exactly one winner', async () => {
+    // This is the idempotent-send guarantee (spec 3.3) under the exact
+    // failure mode it exists for: a scheduler tick that somehow runs twice
+    // for the same due lead must still send exactly once. "Twenty" rather
+    // than "two" so serialisation failing would show up as a flaky count,
+    // not a coin flip.
+    const crm = createMockCrm({ file });
+    const { leadId } = await crm.upsertLead(leadFixture());
+
+    const results = await Promise.all(
+      Array.from({ length: 20 }, () => crm.claimNotification({ leadId, kind: 'FOLLOWUP', step: 0 })),
+    );
+
+    assert.equal(results.filter((r) => r.claimed).length, 1);
+    assert.equal(results.filter((r) => !r.claimed).length, 19);
+  });
 });

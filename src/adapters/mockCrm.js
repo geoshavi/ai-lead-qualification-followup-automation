@@ -27,9 +27,11 @@ import { EVENT_STATUS, EVENT_TYPE } from '../core/schema.js';
 import {
   buildEventRow,
   buildInsertRow,
+  buildNotificationRow,
   buildUpdatePatch,
   coerceEventRow,
   coerceLeadRow,
+  coerceNotificationRow,
   toIsoUtc,
 } from './leadRow.js';
 
@@ -375,6 +377,35 @@ export function createMockCrm(options = {}) {
           .sort((a, b) => Date.parse(a.next_followup_at) - Date.parse(b.next_followup_at))
           .map((row) => coerceLeadRow(row)),
       );
+    },
+
+    /**
+     * Claim a (lead, kind, step) slot before sending (spec 3.3). The one and
+     * only source of truth for "did this go out already" — never a boolean
+     * flag on the lead row, because a flag races.
+     */
+    async claimNotification({ leadId, kind, step } = {}) {
+      return transact(async (state) => {
+        let candidate;
+        try {
+          candidate = buildNotificationRow({ lead_id: leadId, kind, step });
+        } catch (error) {
+          auditFailure(state, 'claimNotification', error);
+          throw error;
+        }
+
+        const existing = state.notifications.find(
+          (row) => row.lead_id === candidate.lead_id && row.kind === candidate.kind && row.step === candidate.step,
+        );
+
+        if (existing) {
+          return { claimed: false, notification: coerceNotificationRow(existing) };
+        }
+
+        const row = { id: randomUUID(), ...candidate, sent_at: now().toISOString() };
+        state.notifications.push(row);
+        return { claimed: true, notification: coerceNotificationRow(row) };
+      });
     },
   };
 }

@@ -22,9 +22,11 @@ import { EVENT_STATUS, EVENT_TYPE } from '../core/schema.js';
 import {
   buildEventRow,
   buildInsertRow,
+  buildNotificationRow,
   buildUpdatePatch,
   coerceEventRow,
   coerceLeadRow,
+  coerceNotificationRow,
   toIsoUtc,
 } from './leadRow.js';
 
@@ -421,6 +423,55 @@ export function createSupabaseCrm(options = {}) {
 
       const rows = await selectRows('listDueFollowups', 'leads', query);
       return rows.map((row) => coerceLeadRow(row));
+    },
+
+    /**
+     * Claim a (lead, kind, step) slot before sending (spec 3.3). Same
+     * insert-then-catch-the-unique-violation shape as upsertLead's duplicate
+     * path: the UNIQUE (lead_id, kind, step) constraint is the guarantee,
+     * this is just how PostgREST reports hitting it.
+     */
+    async claimNotification({ leadId, kind, step } = {}) {
+      let candidate;
+      try {
+        candidate = buildNotificationRow({ lead_id: leadId, kind, step });
+      } catch (error) {
+        await auditFailure('claimNotification', error, leadId ?? null);
+        throw error;
+      }
+
+      try {
+        const [inserted] = await request('claimNotification', '/notifications', {
+          method: 'POST',
+          headers: { Prefer: 'return=representation' },
+          body: JSON.stringify(candidate),
+        });
+        return { claimed: true, notification: coerceNotificationRow(inserted) };
+      } catch (error) {
+        if (error.code !== UNIQUE_VIOLATION) {
+          await auditFailure('claimNotification', error, candidate.lead_id);
+          throw error;
+        }
+      }
+
+      const query = [
+        `lead_id=${filter('eq', candidate.lead_id)}`,
+        `kind=${filter('eq', candidate.kind)}`,
+        `step=${filter('eq', candidate.step)}`,
+        'limit=1',
+      ].join('&');
+      const [existing] = await selectRows('claimNotification', 'notifications', query);
+
+      if (!existing) {
+        const error = new SupabaseCrmError(
+          `supabaseCrm: claimNotification hit a unique violation on (${candidate.lead_id}, ${candidate.kind}, ${candidate.step}) but the row is not readable`,
+          { operation: 'claimNotification', code: UNIQUE_VIOLATION },
+        );
+        await auditFailure('claimNotification', error, candidate.lead_id);
+        throw error;
+      }
+
+      return { claimed: false, notification: coerceNotificationRow(existing) };
     },
   };
 }

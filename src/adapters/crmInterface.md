@@ -120,6 +120,20 @@ SELECT * FROM leads
 Ordered by `next_followup_at` ascending — oldest due first, and deterministic,
 so the two adapters can be compared row for row.
 
+### `claimNotification({ leadId, kind, step }) -> { claimed: boolean, notification }`
+
+The idempotent-send guard from spec 3.3 (M6). Attempts the insert; if
+`UNIQUE (lead_id, kind, step)` refuses it, the message was already sent —
+`claimed` is `false` and `notification` is the *original* claim, not a new
+one. This is the entire duplicate-prevention mechanism for a send: never a
+boolean flag on the lead row, because a flag races (spec 3.3 says so
+explicitly, and `tests/adapter-mock.test.js` fires twenty concurrent claims
+at one `(lead, kind, step)` to prove exactly one wins).
+
+Deliberately quiet: unlike `upsertLead`, a successful claim does **not**
+write its own `lead_events` row. The caller knows what message text actually
+went out and logs `FOLLOWUP_SENT` itself — see `recordEvent` below.
+
 ---
 
 ## Audit logging is automatic
@@ -179,9 +193,12 @@ webhook fired twice cannot create two rows even under genuine concurrency
 (PROJECT_SPEC.md section 7). The mock imitates that guarantee; it does not
 provide it. Do not demo the concurrency claim on the mock.
 
-**Notification idempotency is not here yet.** The `notifications` table and its
-`UNIQUE (lead_id, kind, step)` guard exist in `db/001_schema.sql`, but claiming
-a notification before sending is the scheduler's job and lands with M6.
+**Notification idempotency claims are single-process on the mock, exactly
+like the leads table above.** `claimNotification` (M6) serialises through the
+same in-process queue `upsertLead` does, so it cannot race with itself the
+way the real `UNIQUE (lead_id, kind, step)` constraint guarantees under
+genuine concurrency. Same caveat, same reason: do not demo the concurrency
+claim on the mock.
 
 **No npm dependencies.** `supabaseCrm.js` talks to PostgREST over built-in
 `fetch` rather than through `@supabase/supabase-js` or a Postgres driver. The

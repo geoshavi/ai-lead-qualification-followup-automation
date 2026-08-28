@@ -23,6 +23,7 @@ import {
   EVENT_STATUS,
   EVENT_TYPE,
   FOLLOWUP_STATUS,
+  NOTIFICATION_KIND,
   SOURCES,
   TEMPERATURE,
   createLead,
@@ -326,5 +327,54 @@ export function coerceEventRow(row) {
     details: cloneJson(row.details ?? {}),
     error_message: NULLISH(row.error_message) ? null : toText(row.error_message),
     created_at: toIsoUtc(row.created_at, 'created_at'),
+  };
+}
+
+// ---------------------------------------------------------------------------
+// notifications — the idempotency guard (spec 3.3 / M6)
+// ---------------------------------------------------------------------------
+
+/**
+ * Validate a notification claim before the adapter attempts the insert.
+ *
+ * `UNIQUE (lead_id, kind, step)` is the entire duplicate-prevention mechanism
+ * for a send: "before sending anything, attempt the insert. If it violates
+ * the constraint, the message was already sent — skip" (spec 3.3). This
+ * function only shapes and validates the row; the claim-or-refuse decision is
+ * the adapter's, because only the adapter knows whether the insert landed.
+ */
+export function buildNotificationRow(input) {
+  if (!isPlainObject(input)) {
+    throw new TypeError('claimNotification: expected an object');
+  }
+
+  const leadId = input.lead_id ?? input.leadId;
+  if (typeof leadId !== 'string' || leadId.trim() === '') {
+    throw new TypeError(`notifications.lead_id: required — received ${JSON.stringify(leadId)}`);
+  }
+
+  const kinds = Object.values(NOTIFICATION_KIND);
+  if (!kinds.includes(input.kind)) {
+    throw new TypeError(
+      `notifications.kind: expected one of ${kinds.join(', ')} — received ${JSON.stringify(input.kind)}`,
+    );
+  }
+
+  const step = input.step ?? 0;
+  if (!Number.isInteger(step) || step < 0) {
+    throw new TypeError(`notifications.step: expected a non-negative integer — received ${JSON.stringify(step)}`);
+  }
+
+  return { lead_id: leadId, kind: input.kind, step };
+}
+
+/** Coerce a notification row read back out of a store. */
+export function coerceNotificationRow(row) {
+  return {
+    id: toText(row.id),
+    lead_id: toText(row.lead_id),
+    kind: row.kind,
+    step: toInt(row.step, 'step'),
+    sent_at: toIsoUtc(row.sent_at, 'sent_at'),
   };
 }
