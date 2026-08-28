@@ -340,6 +340,19 @@ return [{ json: { ...lead, sanitized: prepared, systemPrompt: built.systemPrompt
 - **Timeout:** `{{$env.LLM_TIMEOUT_MS}}` — a hung Ollama call must not hold the
   execution open indefinitely (mirrors `src/adapters/llm/ollamaLlm.js`).
 
+**Optional: pointing this node at a hosted provider instead.** `LLM_PROVIDER`
+adapter selection (section 5.0) is a Node-side concept this canvas never
+calls — the canvas always talks to a provider directly over this one HTTP
+Request node, wired by hand. Ollama is the $0 default and the only wiring this
+guide documents in full. Repointing this same node at Anthropic (`POST
+https://api.anthropic.com/v1/messages`, headers `x-api-key` and
+`anthropic-version: 2023-06-01`, the system prompt as a top-level `system`
+field, no `temperature`/`top_p`) is a config-only swap of this node alone —
+see `src/adapters/llm/llmInterface.md`'s per-provider request-shape table for
+the exact Anthropic and OpenAI shapes. It changes nothing else on the canvas
+and nothing in `src/core/`. Treat a hosted-provider run as the optional,
+current-demo path, not the default the acceptance test above assumes.
+
 ### 2.12 Code: Parse Score
 
 Paste **`dist/nodes/scoreParse.js`** then **`dist/nodes/temperature.js`**, then:
