@@ -388,3 +388,35 @@ unit and behavioural-fidelity tests (`tests/build-nodes.test.js`) proving
 each behaves identically to its `src/core/` source, and
 `tests/scheduler.test.js` proves the sequence they're wired into here
 produces exactly the "done when" result against `mockCrm`.
+
+### Live verification (2026-08-28)
+
+Steps 1–4 above were run against the real stack (n8n + Postgres via
+`compose.yaml`, not `mockCrm`), using the HOT lead from `docs/workflow.md`'s
+M4 acceptance walkthrough (`vakosh1+schedulertz@gmail.com`):
+
+- **Step 1 (seed):** `followup_step = 0`, `next_followup_at` set 1 hour
+  into the past.
+- **Step 2 (send):** the due-query picked the lead up. Result:
+  `followup_step` advanced `0 → 1`, `last_contacted_at` was set, exactly
+  one `FOLLOWUP_SENT` row was logged (`step: 0`, real generated message
+  text), and `next_followup_at` advanced to `2026-08-31 16:00:00+00` —
+  `09:00 America/Los_Angeles` on the next business day, confirming the
+  `BUSINESS_TZ` fix (`docs/workflow.md` §2.14; commits 1478738/93a2370)
+  holds through this canvas's `advanceFollowup` path, not just the M4
+  intake canvas's `startFollowup`.
+- **Step 3 (no double-send):** an immediate second run left `followup_step`
+  at `1` and the `FOLLOWUP_SENT` count at exactly `1` — the due-query
+  correctly excluded the lead once `next_followup_at` moved into the
+  future. (This exercised the due-query's own exclusion; the idempotency
+  claim's separate re-check — re-running "Claim Notification" by hand for
+  the same `(lead_id, 'FOLLOWUP', 0)` — was not run this pass.)
+- **Step 4 (stop on reply):** with `replied_at` set and `next_followup_at`
+  forced past-due again, the next run set `followup_status = STOPPED`,
+  `next_followup_at = NULL`, logged exactly one `FOLLOWUP_STOPPED` row
+  with `reason: "lead_replied"`, and produced **no** second
+  `FOLLOWUP_SENT` row — the stop pre-empted the send, matching spec 6.3.
+
+Step 5 (`COMPLETED` on the last cadence step) was **not** exercised this
+pass — still covered only by `tests/scheduler.test.js`'s frozen-clock
+suite, not live.
