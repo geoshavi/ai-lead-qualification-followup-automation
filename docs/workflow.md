@@ -364,6 +364,19 @@ the exact Anthropic and OpenAI shapes. It changes nothing else on the canvas
 and nothing in `src/core/`. Treat a hosted-provider run as the optional,
 current-demo path, not the default the acceptance test above assumes.
 
+**Retry On Fail verified live** (live-named **Claude Score** after this
+project's optional switch to the Anthropic adapter): Settings → Retry On
+Fail is ON, Max Tries `3`, Wait `1000ms`, On Error: Stop Workflow —
+confirmed directly in the running canvas. This is a *different* mechanism
+from `src/core/retry.js`'s deterministic backoff policy (spec 9, M8, commit
+`5cb3a10`): that code is exercised by the automated test suite through
+`scoreLead()`, which no live canvas node calls — every canvas in this
+project talks to the provider over a raw HTTP Request node, wired by hand,
+never `require()`-ing an adapter file (section 1). The two are
+complementary, not redundant: one is unit-tested application logic nothing
+here invokes; the other is the actual retry behaviour this running node
+has, verified by hand rather than by `npm test`.
+
 ### 2.12 Code: Parse Score
 
 Paste **`dist/nodes/scoreParse.js`** then **`dist/nodes/temperature.js`**, then:
@@ -393,6 +406,12 @@ Condition: `{{$json.ok}}` is `true`.
 **FALSE branch — the one retry section 5.3 allows:**
 - **Code node**, pasting `prompt.js` again, calling `buildScoringPrompt(lead, { strict: true })` to get `STRICT_RETRY_REMINDER` appended.
 - **HTTP Request** — same Ollama call as 2.11, with the strict prompt.
+  Live-named **Claude Retry**; Retry On Fail is verified ON here too, same
+  setting as 2.11 (Max Tries `3`, Wait `1000ms`, On Error: Stop Workflow) —
+  this is 5.3's malformed-*answer* retry happening at the canvas level, and
+  is orthogonal to that n8n node-level transport retry, which can still
+  retry *this* HTTP call before it ever reaches the strict-prompt logic
+  above.
 - **Code node** — same parse as 2.12.
 - **IF: parsed ok? (second attempt)**
   - **FALSE:** paste `scoreParse.js`, call `buildScoreFailurePatch({ reason: 'invalid_response' })`, then continue to **Apply Score Failure** (2.14) — `crm_status` becomes `HUMAN_REVIEW` there and **AI_SCORE_INVALID** is logged by **Log AI Score Invalid** right after; the lead still persists (spec 5.3's core guarantee).

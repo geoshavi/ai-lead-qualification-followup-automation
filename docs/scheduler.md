@@ -240,6 +240,11 @@ prompt on a different day.
   headers, system prompt as a top-level field, no `temperature`/`top_p`. See
   `src/adapters/llm/llmInterface.md`'s per-provider table. Ollama remains the
   $0 default this guide documents in full.
+- **Retry On Fail verified live** (live-named **Claude Follow-up**): Settings
+  → Retry On Fail is ON, Max Tries `3`, Wait `1000ms`, On Error: Stop
+  Workflow — same n8n node-level mechanism `docs/workflow.md` §2.11
+  documents, distinct from `src/core/retry.js`'s code-level policy (spec 9,
+  M8, commit `5cb3a10`), which no canvas node here calls either.
 
 ### 2.10 Code: Extract Message Text
 
@@ -256,11 +261,12 @@ return [{ json: { ...$('Build Follow-up Prompt').first().json, message: text } }
 
 An empty completion fails the node loudly rather than logging a blank
 `FOLLOWUP_SENT` — the same "fail loudly, do not half-populate" instinct
-`normalize.js` documents for an unmapped source. n8n's own retry-on-fail
-setting on this node (or the HTTP Request node before it) is the M8
-resilience concern; nothing here needs to duplicate scoring's two-attempt
-retry, because there is no structured output to have failed parsing —
-"the model returned words" is the entire correctness bar for free text.
+`normalize.js` documents for an unmapped source. Retry-on-fail belongs on
+**Claude Follow-up** (2.9), not here — confirmed live (see 2.9's own note) —
+because that is where the actual external call is; nothing here needs to
+duplicate scoring's two-attempt retry, because there is no structured
+output to have failed parsing — "the model returned words" is the entire
+correctness bar for free text.
 
 ### 2.11 Postgres: log FOLLOWUP_SENT
 

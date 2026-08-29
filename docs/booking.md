@@ -307,7 +307,11 @@ Condition: `{{$env.DRY_RUN}}` equals `'true'`. Same structure as
 - **FALSE:** **Slack node** (Incoming Webhook, `{{$env.SLACK_WEBHOOK_URL}}`)
   posts a booking-confirmation message (e.g. *"📅 {{first_name}}
   {{last_name}} just booked a call — {{company}}"*), then a Postgres node
-  logs `SLACK_ALERT_SENT` with `status = 'SUCCESS'`.
+  logs `SLACK_ALERT_SENT` with `status = 'SUCCESS'`. Live-named **Send
+  Booking Confirmation**; Retry On Fail is verified ON (Max Tries `3`, Wait
+  `1000ms`, On Error: Stop Workflow) — same n8n node-level mechanism
+  `docs/workflow.md` §2.11 documents, distinct from `src/core/retry.js`'s
+  code-level policy (spec 9, M8), which no canvas node here calls.
 
 Both branches continue to 2.13.
 
@@ -324,7 +328,11 @@ Condition: `{{$env.DRY_RUN}}` equals `'true'`.
   `lead_id` overwrites the same row rather than appending a duplicate — a
   different guarantee than 2.10/2.11's claim-based suppression, and it does
   not need one, since re-writing identical values is harmless. Then a
-  Postgres node logs `SHEET_SYNCED` with `status = 'SUCCESS'`.
+  Postgres node logs `SHEET_SYNCED` with `status = 'SUCCESS'`. Live-named
+  **Sync Booking to Sheet**; Retry On Fail is verified ON here too (Max
+  Tries `3`, Wait `1000ms`, On Error: Stop Workflow) — same n8n node-level
+  mechanism as 2.12's Slack node, distinct from `src/core/retry.js`'s
+  code-level policy (spec 9, M8), which no canvas node here calls.
 
 Both branches continue to 2.14.
 
