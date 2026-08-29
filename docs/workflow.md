@@ -69,8 +69,8 @@ container needs no account, matching section 1.1's default stack.
                            was itself invalid]  VALIDATION_             |
                           [Respond 200]         FAILED]        [HTTP Request: Ollama /api/chat]
                                                 [Respond 200]          |
-                                          (no scoring, no Slack   [Code: Parse Score (attempt 1)]  <-- scoreParse.js
-                                           for either branch)            |
+                                        (no scoring, no follow-up,  [Code: Parse Score (attempt 1)]  <-- scoreParse.js
+                                         no Slack for either branch)         |
                                              [IF: parsed ok?]
                                               /            \
                                            FALSE           TRUE
@@ -85,14 +85,25 @@ container needs no account, matching section 1.1's default stack.
                                  [IF: parsed ok?]               |
                                   /          \                 |
                                FALSE         TRUE               |
-                                 |             \                |
-                    [Code: Score Failure   [Code: Apply Score]  |
-                     Patch]  <-- scoreParse.js         (both join here)
-                                 |             /
-                          [Postgres: UPDATE lead with score/temperature]
-                          [Postgres: log AI_SCORE_CREATED or AI_SCORE_INVALID]
-                                 |
-                          [IF: lead_temperature == 'HOT']
+                                 |             |                 |
+                  [Postgres: Apply    [Postgres: Apply Score     |
+                   Score Failure]      Retry]                    |
+                                 |             |                  |
+                  [Postgres: Log AI           |          [Postgres: Apply Score]
+                   Score Invalid]             |                  |
+                                 |              \                /
+                  [Respond 200 -                 \              /
+                   Score Invalid]         [Postgres: Log AI Score Created]
+                  (PENDING/NULL —          (fed by Apply Score and Apply Score
+                   Start Follow-up          Retry; INSERT AI_SCORE_CREATED,
+                   never runs here)          then returns the current lead row)
+                                                       |
+                                              [Code: Start Follow-up]  <-- dist/nodes/followup.js
+                                                       |             (spec 6.1: intake starts
+                                              [Postgres: Update         the sequence and exits;
+                                               Follow-up State]          M6 only ever advances
+                                                       |                  one already started)
+                                              [IF: lead_temperature == 'HOT']
                            /                        \
                         FALSE                      TRUE
                           |                           |
@@ -384,29 +395,123 @@ Condition: `{{$json.ok}}` is `true`.
 - **HTTP Request** — same Ollama call as 2.11, with the strict prompt.
 - **Code node** — same parse as 2.12.
 - **IF: parsed ok? (second attempt)**
-  - **FALSE:** paste `scoreParse.js`, call `buildScoreFailurePatch({ reason: 'invalid_response' })`. This is where **AI_SCORE_INVALID** gets logged and `crm_status` becomes `HUMAN_REVIEW` — the lead still persists (spec 5.3's core guarantee).
-  - **TRUE:** join the success path below.
+  - **FALSE:** paste `scoreParse.js`, call `buildScoreFailurePatch({ reason: 'invalid_response' })`, then continue to **Apply Score Failure** (2.14) — `crm_status` becomes `HUMAN_REVIEW` there and **AI_SCORE_INVALID** is logged by **Log AI Score Invalid** right after; the lead still persists (spec 5.3's core guarantee).
+  - **TRUE:** continue to **Apply Score Retry** (2.14).
 
-**TRUE branch:** continue directly.
+**TRUE branch:** continue to **Apply Score** (2.14).
 
 ### 2.14 Postgres: Apply Score
 
+2.13's two `parsed ok?` checks resolve into exactly one of two branches from
+here: a successful score (either attempt) applies and logs on the path that
+continues to Start Follow-up (2.15); a twice-failed score applies and logs
+on its own separate path that responds immediately instead.
+
+**Success — either `parsed ok?` was `TRUE`:**
+
+- **Postgres node — `Apply Score`** (wired from the first attempt's `TRUE`)
+  and **`Apply Score Retry`** (wired from the second attempt's `TRUE`) are
+  two separate node instances running the identical query below — n8n
+  needs one node per incoming branch here, since nothing upstream merges
+  them first:
+
+  ```sql
+  UPDATE leads SET
+    lead_score = $1, lead_temperature = $2, ai_reasoning = $3,
+    recommended_action = $4, crm_status = $5,
+    needs_human_review = $6, review_reason = $7
+  WHERE lead_id = $8
+  RETURNING *;
+  ```
+
+  Bind from the patch object built in 2.12 (`buildScorePatch`) plus the
+  `lead_id` from the upsert step (2.7).
+
+- **Postgres node — `Log AI Score Created`**, fed by both nodes above.
+  Logs the event, then hands back the row Start Follow-up (2.15) reads:
+
+  ```sql
+  INSERT INTO lead_events (event_type, status, lead_id, details)
+  VALUES ('AI_SCORE_CREATED', 'SUCCESS', $1, $2);
+
+  SELECT * FROM leads WHERE lead_id = $1;
+  ```
+
+  Bind `$1` from the lead's `lead_id`, `$2` from a JSON object carrying the
+  score/temperature/reasoning for the audit trail. n8n's Postgres node
+  returns the last statement's rows, so `$('Log AI Score Created').first().json`
+  downstream is the full current `leads` row (the `SELECT`), not the insert.
+
+**Failure — the second `parsed ok?` was `FALSE`:**
+
+- **Postgres node — `Apply Score Failure`**: the same `UPDATE leads SET
+  ...` shape as above, bound from `buildScoreFailurePatch` instead —
+  `lead_score`/`lead_temperature`/`ai_reasoning`/`recommended_action` come
+  back `NULL`, `crm_status` is `HUMAN_REVIEW`, `needs_human_review` is
+  `true`, `review_reason` records why.
+- **Postgres node — `Log AI Score Invalid`**: `INSERT INTO lead_events
+  (event_type, status, lead_id, details) VALUES ('AI_SCORE_INVALID',
+  'FAILURE', $1, $2)`, bound the same way as `Log AI Score Created` above.
+- **Respond to Webhook — `Respond 200 - Score Invalid`**, status `200`.
+  This branch never reaches Start Follow-up: `followup_status` stays at
+  its schema default `PENDING` and `next_followup_at` stays `NULL` — the
+  same reasoning as the validation-failure branch (2.4) — a person clears
+  the review and starts the sequence deliberately (spec 5.3's core
+  guarantee: the lead still persists either way).
+
+### 2.15 Code: Start Follow-up
+
+This node sits directly after **Log AI Score Created** on the shared
+success path and feeds **Update Follow-up State** (2.16) next —
+`Log AI Score Created → Start Follow-up → Update Follow-up State → HOT?`,
+with nothing branching in between. AI_SCORE_INVALID leads never reach this
+node: they already exited on their own failure branch
+(`Apply Score Failure → Log AI Score Invalid → Respond 200 - Score Invalid`),
+so every lead here carries a real, non-null `lead_temperature`.
+
+Paste **`dist/nodes/followup.js`**, then:
+
+```js
+const lead = $('Log AI Score Created').first().json;
+
+const patch = startFollowup(lead, { now: new Date(), timeZone: $env.BUSINESS_TZ });
+
+return [{ json: { lead, patch: { followup_step: 0, ...patch } } }];
+```
+
+Section 6.1 is explicit about the division of labour this step exists for:
+*"the intake workflow writes `next_followup_at` to the leads table and
+exits"* — starting the sequence is the intake canvas's job, not the M6
+scheduler's (`docs/scheduler.md`). The scheduler only ever **advances** a
+lead whose `followup_status` is already `IN_PROGRESS`; nothing here sends a
+message or logs `FOLLOWUP_SENT` — step 0's `next_followup_at` is computed as
+"immediate" (clamped to business hours), so the scheduler's own next tick
+picks this lead up and sends step 0 through its normal path within 15
+minutes (spec 6.1). Logging that send twice — once here, once from the
+scheduler — is exactly the mistake this split avoids.
+
+There is deliberately no new audit event type for "follow-up started": the
+section 3.2 enumeration has none, and inventing one would be a data-model
+change this milestone does not need — the state change is visible in the
+row itself, exactly like `crm_status` moving to `HUMAN_REVIEW` is not its
+own logged event either.
+
+### 2.16 Postgres: Update Follow-up State
+
 ```sql
 UPDATE leads SET
-  lead_score = $1, lead_temperature = $2, ai_reasoning = $3,
-  recommended_action = $4, crm_status = $5,
-  needs_human_review = $6, review_reason = $7
-WHERE lead_id = $8
+  followup_status = $1, followup_step = $2, next_followup_at = $3
+WHERE lead_id = $4
 RETURNING *;
 ```
 
-Bind from the patch object built in 2.12/2.13 (`buildScorePatch` or
-`buildScoreFailurePatch`) plus the `lead_id` from the upsert step (2.7).
+Bind `$1..$3` from `{{$json.patch}}`, `$4` from the lead's `lead_id`. Runs
+unconditionally — every execution reaching this node already carries a real
+`startFollowup` patch, since AI_SCORE_INVALID leads exited on their own
+failure branch before Start Follow-up ever ran, so there is no `IF` node
+here to wire.
 
-Follow with a Postgres insert logging **AI_SCORE_CREATED** (success path) or
-**AI_SCORE_INVALID** (failure path), `status` `SUCCESS`/`FAILURE` to match.
-
-### 2.15 IF: HOT?
+### 2.17 IF: HOT?
 
 Condition: `{{$json.lead_temperature}}` equals `HOT`.
 
@@ -449,7 +554,8 @@ All already declared in `.env.example` (section 12) — set real values in
 n8n's own environment/credentials, never in the canvas itself:
 
 `WEBHOOK_SECRET`, `OLLAMA_BASE_URL`, `OLLAMA_MODEL`, `LLM_TIMEOUT_MS`,
-`HOT_SCORE_THRESHOLD`, `DRY_RUN`, `SLACK_WEBHOOK_URL`.
+`HOT_SCORE_THRESHOLD`, `DRY_RUN`, `SLACK_WEBHOOK_URL`, `BUSINESS_TZ` (step
+2.15's business-hours clamping).
 
 ---
 
@@ -515,10 +621,13 @@ that was never scored.
 1. Run the `curl` command above once. Confirm: one new row in `leads` (its
    `dedupe_key` will be `email:ada@example.com`, per section 7's precedence —
    `source_id` was never supplied), `lead_score`/`lead_temperature` populated,
-   and — with `DRY_RUN=true` — a `SLACK_ALERT_SENT` / `SKIPPED` row in
-   `lead_events` rather than an actual Slack message. Flip `DRY_RUN=false` and
-   fire once more with a different email to see a real Slack message before
-   returning it to `true`.
+   `followup_status = 'IN_PROGRESS'` with `followup_step = 0` and
+   `next_followup_at` set to a near-immediate business-hours timestamp (step
+   2.15 — the M6 scheduler's next tick, within 15 minutes, is what actually
+   sends step 0; nothing here does), and — with `DRY_RUN=true` — a
+   `SLACK_ALERT_SENT` / `SKIPPED` row in `lead_events` rather than an actual
+   Slack message. Flip `DRY_RUN=false` and fire once more with a different
+   email to see a real Slack message before returning it to `true`.
 2. Run the identical `curl` command again. Confirm: `leads` has **no** new
    row, and `lead_events` has exactly one new `DUPLICATE_FOUND` row and
    nothing else — no second `AI_SCORE_CREATED`, no second `SLACK_ALERT_SENT`.
@@ -528,9 +637,11 @@ that was never scored.
    `AI_SCORE_CREATED` → `SLACK_ALERT_SENT` → `DUPLICATE_FOUND`.
 4. Run the [invalid-submission `curl` command](#51-test-curl-command--an-invalid-submission-scenario-7)
    once. Confirm: one new row, `crm_status = 'HUMAN_REVIEW'`,
-   `lead_score IS NULL`, and exactly one `VALIDATION_FAILED` row in
-   `lead_events` — no `AI_SCORE_CREATED`, no `SLACK_ALERT_SENT`, either way.
-   The lead was never dropped (scenario 7, section 10).
+   `lead_score IS NULL`, `followup_status = 'PENDING'` with
+   `next_followup_at IS NULL` (never started — step 2.15 is never reached on
+   this branch), and exactly one `VALIDATION_FAILED` row in `lead_events` —
+   no `AI_SCORE_CREATED`, no `SLACK_ALERT_SENT`, either way. The lead was
+   never dropped (scenario 7, section 10).
 
 If any of this diverges, the mismatch is almost always in the wiring, not the
 snippets — every `dist/nodes/*.js` file has unit and behavioural-fidelity

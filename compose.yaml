@@ -1,0 +1,78 @@
+name: automation-project-n8n
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: leadengine
+      POSTGRES_USER: leadengine
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./db/001_schema.sql:/docker-entrypoint-initdb.d/001_schema.sql:ro
+      - ./db/002_indexes.sql:/docker-entrypoint-initdb.d/002_indexes.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U leadengine -d leadengine"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+    networks:
+      - automation_internal
+
+  n8n:
+    image: docker.n8n.io/n8nio/n8n:latest
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:5679:5678"
+    environment:
+      DB_TYPE: postgresdb
+      DB_POSTGRESDB_HOST: postgres
+      DB_POSTGRESDB_PORT: 5432
+      DB_POSTGRESDB_DATABASE: leadengine
+      DB_POSTGRESDB_USER: leadengine
+      DB_POSTGRESDB_PASSWORD: ${POSTGRES_PASSWORD}
+      N8N_ENCRYPTION_KEY: ${N8N_ENCRYPTION_KEY}
+      N8N_HOST: localhost
+      N8N_PORT: 5678
+      N8N_PROTOCOL: http
+      N8N_EDITOR_BASE_URL: http://localhost:5679/
+      WEBHOOK_URL: http://localhost:5679/
+      GENERIC_TIMEZONE: ${BUSINESS_TZ}
+      TZ: ${BUSINESS_TZ}
+      BUSINESS_TZ: ${BUSINESS_TZ}
+      N8N_BLOCK_ENV_ACCESS_IN_NODE: "false"
+      WEBHOOK_SECRET: ${WEBHOOK_SECRET}
+      LLM_PROVIDER: ${LLM_PROVIDER}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY}
+      ANTHROPIC_MODEL: ${ANTHROPIC_MODEL}
+      OLLAMA_BASE_URL: http://host.docker.internal:11434
+      OLLAMA_MODEL: ${OLLAMA_MODEL}
+      LLM_TIMEOUT_MS: ${LLM_TIMEOUT_MS}
+      CRM_ADAPTER: ${CRM_ADAPTER}
+      SLACK_WEBHOOK_URL: ${SLACK_WEBHOOK_URL}
+      HOT_SCORE_THRESHOLD: ${HOT_SCORE_THRESHOLD}
+      DRY_RUN: ${DRY_RUN}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - n8n_data:/home/node/.n8n
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://127.0.0.1:5678/healthz"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
+    networks:
+      - automation_internal
+
+networks:
+  automation_internal:
+    internal: false
+
+volumes:
+  n8n_data:
+  postgres_data:
