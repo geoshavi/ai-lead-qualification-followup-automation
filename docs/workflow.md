@@ -428,19 +428,50 @@ on its own separate path that responds immediately instead.
   `lead_id` from the upsert step (2.7).
 
 - **Postgres node — `Log AI Score Created`**, fed by both nodes above.
-  Logs the event, then hands back the row Start Follow-up (2.15) reads:
+  Logs the event and hands back the row Start Follow-up (2.15) reads, in
+  one statement — the `CROSS JOIN` forces the CTE's `INSERT` to run before
+  the final `SELECT`, whose row becomes this node's output:
 
   ```sql
-  INSERT INTO lead_events (event_type, status, lead_id, details)
-  VALUES ('AI_SCORE_CREATED', 'SUCCESS', $1, $2);
-
-  SELECT * FROM leads WHERE lead_id = $1;
+  WITH logged AS (
+    INSERT INTO lead_events (
+      lead_id,
+      event_type,
+      status,
+      details
+    )
+    VALUES (
+      $1,
+      'AI_SCORE_CREATED',
+      'SUCCESS',
+      $2::jsonb
+    )
+    RETURNING 1
+  )
+  SELECT l.*
+  FROM leads l
+  CROSS JOIN logged
+  WHERE l.lead_id = $1;
   ```
 
-  Bind `$1` from the lead's `lead_id`, `$2` from a JSON object carrying the
-  score/temperature/reasoning for the audit trail. n8n's Postgres node
-  returns the last statement's rows, so `$('Log AI Score Created').first().json`
-  downstream is the full current `leads` row (the `SELECT`), not the insert.
+  **Query Parameters:**
+
+  ```
+  {{ [
+    $('Upsert Lead').first().json.lead_id,
+    JSON.stringify({
+      score: $json.lead_score,
+      temperature: $json.lead_temperature,
+      reasoning: $json.ai_reasoning
+    })
+  ] }}
+  ```
+
+  `$1` is the lead's `lead_id` from **Upsert Lead** (2.7); `$2` is a JSON
+  object built from the current item's `lead_score`/`lead_temperature`/
+  `ai_reasoning` — the columns `Apply Score`/`Apply Score Retry` just
+  returned. `$('Log AI Score Created').first().json` downstream is this
+  query's `SELECT` row: the full current `leads` row, not the insert.
 
 **Failure — the second `parsed ok?` was `FALSE`:**
 
@@ -449,9 +480,40 @@ on its own separate path that responds immediately instead.
   `lead_score`/`lead_temperature`/`ai_reasoning`/`recommended_action` come
   back `NULL`, `crm_status` is `HUMAN_REVIEW`, `needs_human_review` is
   `true`, `review_reason` records why.
-- **Postgres node — `Log AI Score Invalid`**: `INSERT INTO lead_events
-  (event_type, status, lead_id, details) VALUES ('AI_SCORE_INVALID',
-  'FAILURE', $1, $2)`, bound the same way as `Log AI Score Created` above.
+- **Postgres node — `Log AI Score Invalid`**:
+
+  ```sql
+  INSERT INTO lead_events (
+    lead_id,
+    event_type,
+    status,
+    details,
+    error_message
+  )
+  VALUES (
+    $1,
+    'AI_SCORE_INVALID',
+    'FAILURE',
+    $2::jsonb,
+    $3
+  );
+  ```
+
+  **Query Parameters:**
+
+  ```
+  {{ [
+    $('Upsert Lead').first().json.lead_id,
+    JSON.stringify({ reason: 'invalid_response_after_retry' }),
+    'LLM returned invalid scoring JSON after retry'
+  ] }}
+  ```
+
+  `$1` is the lead's `lead_id` from **Upsert Lead** (2.7); `$2` is a fixed
+  `{ reason: 'invalid_response_after_retry' }` details object; `$3` is a
+  fixed, human-readable `error_message` — a real, populated column here,
+  unlike `Log AI Score Created`. This node doesn't need to hand back the
+  lead row: nothing downstream of the failure branch reads it.
 - **Respond to Webhook — `Respond 200 - Score Invalid`**, status `200`.
   This branch never reaches Start Follow-up: `followup_status` stays at
   its schema default `PENDING` and `next_followup_at` stays `NULL` — the
