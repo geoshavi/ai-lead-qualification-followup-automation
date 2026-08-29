@@ -255,11 +255,18 @@ describe('scenario 12: the model returns invalid JSON twice', () => {
 // Scenario 16 — the local provider is not running
 // ---------------------------------------------------------------------------
 describe('scenario 16: Ollama unavailable or timing out', () => {
-  test('an unreachable provider flags for review instead of dropping the lead', async () => {
-    const unreachable = async () => { throw new TypeError('fetch failed'); };
-    const provider = createLlmProvider({ OLLAMA_MODEL: 'm' }, { fetchImpl: unreachable });
-    const result = await scoreLead({ lead: LEAD, provider });
+  // A no-op sleep keeps every retry test instant — only backoffDelayMs's own
+  // unit tests (tests/core-retry.test.js) need to assert real millisecond
+  // values.
+  const fastSleep = async () => {};
 
+  test('an unreachable provider retries with backoff, then flags for review instead of dropping the lead', async () => {
+    let calls = 0;
+    const unreachable = async () => { calls += 1; throw new TypeError('fetch failed'); };
+    const provider = createLlmProvider({ OLLAMA_MODEL: 'm' }, { fetchImpl: unreachable });
+    const result = await scoreLead({ lead: LEAD, provider, sleepImpl: fastSleep });
+
+    assert.equal(calls, 3, 'retries up to the default policy bound before giving up (spec 9, M8)');
     assert.equal(result.ok, false);
     assert.equal(result.patch.needs_human_review, true);
     assert.equal(result.patch.crm_status, 'HUMAN_REVIEW');
@@ -271,26 +278,57 @@ describe('scenario 16: Ollama unavailable or timing out', () => {
       options.signal.addEventListener('abort', () => reject(options.signal.reason));
     });
     const provider = createLlmProvider({ OLLAMA_MODEL: 'm' }, { fetchImpl: hangs, timeoutMs: 20 });
-    const result = await scoreLead({ lead: LEAD, provider, timeoutMs: 20 });
+    const result = await scoreLead({ lead: LEAD, provider, timeoutMs: 20, sleepImpl: fastSleep });
 
     assert.equal(result.ok, false);
     assert.match(result.patch.review_reason, /provider/);
     assert.ok(eventTypes(result).includes('AI_SCORE_INVALID'));
   });
 
-  test('a transport failure is not retried — that is the M8 resilience pass', async () => {
+  test('a transient transport failure retries with backoff and eventually succeeds (spec 9, M8)', async () => {
+    let calls = 0;
+    const flaky = async () => {
+      calls += 1;
+      if (calls < 3) throw new TypeError('fetch failed');
+      return new Response(fixture('ollama-valid'), { status: 200, headers: { 'content-type': 'application/json' } });
+    };
+    const provider = createLlmProvider({ OLLAMA_MODEL: 'm' }, { fetchImpl: flaky });
+    const result = await scoreLead({ lead: LEAD, provider, sleepImpl: fastSleep });
+
+    assert.equal(calls, 3, 'succeeded on the third attempt, after two retried transport failures');
+    assert.equal(result.ok, true);
+    assert.equal(result.patch.lead_score, 82);
+  });
+
+  test('a persistent transport failure retries up to the policy bound, then still flags for review', async () => {
     let calls = 0;
     const unreachable = async () => { calls += 1; throw new TypeError('fetch failed'); };
     const provider = createLlmProvider({ OLLAMA_MODEL: 'm' }, { fetchImpl: unreachable });
-    await scoreLead({ lead: LEAD, provider });
+    const result = await scoreLead({ lead: LEAD, provider, sleepImpl: fastSleep });
 
-    assert.equal(calls, 1, 'the 5.3 retry is for a malformed answer, not a broken connection');
+    assert.equal(calls, 3, 'the default policy is 3 total attempts — bounded, never a loop');
+    assert.equal(result.ok, false);
+    const event = result.events.find((e) => e.event_type === 'AI_SCORE_INVALID');
+    assert.equal(event.details.transport_attempts, 3);
+  });
+
+  test('a non-retryable transport-classified failure (bad request) is not retried', async () => {
+    let calls = 0;
+    const badRequest = async () => {
+      calls += 1;
+      return new Response(JSON.stringify({ error: 'bad request' }), { status: 400, headers: { 'content-type': 'application/json' } });
+    };
+    const provider = createLlmProvider({ OLLAMA_MODEL: 'm' }, { fetchImpl: badRequest });
+    const result = await scoreLead({ lead: LEAD, provider, sleepImpl: fastSleep });
+
+    assert.equal(calls, 1, 'a 400 is a fixed problem — retrying would resend the identical mistake');
+    assert.equal(result.ok, false);
   });
 
   test('the failure event names the provider so triage is possible', async () => {
     const unreachable = async () => { throw new TypeError('fetch failed'); };
     const provider = createLlmProvider({ OLLAMA_MODEL: 'm' }, { fetchImpl: unreachable });
-    const result = await scoreLead({ lead: LEAD, provider });
+    const result = await scoreLead({ lead: LEAD, provider, sleepImpl: fastSleep });
 
     const event = result.events.find((e) => e.event_type === 'AI_SCORE_INVALID');
     assert.equal(event.details.provider, 'ollama');

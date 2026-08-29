@@ -19,7 +19,7 @@ function stripCommentsAndStrings(source) {
 }
 
 describe('src/core is dependency-free (spec 1 and 0.4)', () => {
-  test('the expected eleven modules exist', () => {
+  test('the expected twelve modules exist', () => {
     // Pinned on purpose: a new core module is a spec-level decision (section 2),
     // and every one of these is concatenated into a pasteable Code-node snippet.
     assert.deepEqual(coreFiles, [
@@ -28,6 +28,7 @@ describe('src/core is dependency-free (spec 1 and 0.4)', () => {
       'followupPrompt.js',
       'normalize.js',
       'prompt.js',
+      'retry.js',
       'sanitize.js',
       'schema.js',
       'scoreParse.js',

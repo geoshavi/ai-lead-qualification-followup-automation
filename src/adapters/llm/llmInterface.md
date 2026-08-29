@@ -110,17 +110,27 @@ success. The adapter checks for it explicitly.
 
 ---
 
-## Retry, and what is deliberately absent
+## Retry
 
-`scoreLead.js` implements exactly the section 5.3 retry: a response that fails
-validation earns **one** more attempt with `STRICT_RETRY_REMINDER` appended,
-and a second failure writes `AI_SCORE_INVALID`, sets `crm_status =
-HUMAN_REVIEW` and `needs_human_review = true`, and still persists the lead.
+Two independent retries, for two different failures, both bounded:
 
-A **transport** failure gets no retry here. Section 5.3's retry is for a
-malformed *answer*; retry with backoff on every external call is the M8
-resilience pass. Zero retries is bounded, and a lead that cannot be scored is
-flagged rather than dropped either way.
+- **A malformed answer** (spec 5.3) earns **one** more attempt with
+  `STRICT_RETRY_REMINDER` appended. A second failure writes
+  `AI_SCORE_INVALID`, sets `crm_status = HUMAN_REVIEW` and
+  `needs_human_review = true`, and still persists the lead.
+- **A transient transport failure** (spec 9, M8) — `timeout`, `unreachable`,
+  or an `http_error` at `429`/`5xx` — is retried with exponential backoff, up
+  to `src/core/retry.js`'s `DEFAULT_RETRY_POLICY` (3 total attempts, 200ms
+  base delay, doubling, capped at 5s), *before* it ever reaches the section
+  5.3 retry above. An `http_error` at any other status (bad auth, bad
+  request) is not retried — an identical request would just resend the same
+  mistake. `callProviderWithRetry` in `scoreLead.js` is what does this;
+  `tests/llm-score-lead.test.js`'s "scenario 16" describe block proves both
+  the eventual-success and exhausted-retries paths, with an injected
+  `sleepImpl` so the suite stays instant.
+
+Both retries are bounded on purpose — a lead that cannot be scored is
+flagged rather than dropped, never retried forever.
 
 ---
 

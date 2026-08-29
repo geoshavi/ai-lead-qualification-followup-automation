@@ -7,25 +7,42 @@ deterministic follow-up sequence that stops when it should. Duplicate submission
 cannot create duplicate rows or duplicate messages — that guarantee is enforced by
 the database, not by workflow logic.
 
-> **Status: M7 (booking + reporting) complete.** `docs/booking.md` is the
-> node-by-node guide for the **third**, separate n8n workflow: a booking
-> webhook that cancels a lead's follow-up sequence, sends a Slack
-> confirmation, and syncs a Google Sheet row, all `DRY_RUN`-capable. No new
-> `src/core/` module was needed — `evaluateStopConditions` already covered
-> `booking_status = 'BOOKED'` since M1 (spec 6.3), so the only new logic is a
-> single guard in the canvas's own Code node: only report a sequence
-> "stopped" when one was actually `IN_PROGRESS` to begin with. Idempotency
-> reuses spec 3.3's `notifications` claim (`BOOKING_CONFIRM`, step 0) for the
-> Slack send; the Google Sheets sync is idempotent by construction instead
-> (`Append or update row`, keyed on `lead_id` — the same key overwrites, it
-> never appends a duplicate). 640 tests, 639 passing, 1 skipped (the M2
-> hosted-parity marker), 0 changed by this milestone — no `src/core/`,
-> `dist/nodes/`, or `db/` file was touched, so the suite's own result is
-> exactly what it was at M6. Building the canvas itself in n8n, and
-> confirming it reproduces the acceptance result against a real Postgres,
-> Slack, and Google Sheet, remain manual steps — see `docs/booking.md`'s own
-> acceptance-test walkthrough. See `PROJECT_SPEC.md` §9 for the full
-> milestone plan. This README is expanded into full documentation at M9.
+> **Status: M8 (resilience pass) complete.** `src/core/retry.js` (new — the
+> twelfth core module) is a deterministic, bounded retry-with-backoff policy:
+> `shouldRetry`, `backoffDelayMs`, and `isRetryableFailure`, which classifies
+> a normalised `{kind, status}` failure as transient (`timeout`,
+> `unreachable`, `http_error` at `429`/`5xx`) or fixed (any other
+> `http_error`, `empty_response`) — no jitter, no clock, so a schedule is
+> exact and reproducible. `src/adapters/llm/scoreLead.js`'s
+> `callProviderWithRetry` applies it to the one real transport call this
+> project's code makes: up to 3 attempts, 200ms/400ms backoff, before a
+> transient failure reaches the existing persist-and-flag path — a *malformed
+> answer* still gets its own, separate section 5.3 retry one layer up. A
+> fixed failure (bad auth, bad request) is never retried — resending an
+> identical request would just resend the identical mistake. Section 10's
+> scenario 13 (a failing external call retried, then resolved) has no Slack
+> adapter to call — Slack is n8n's built-in node on the canvas, like every
+> other outbound send in this project — so its automated assertion is the
+> generic mechanism itself, composed and proven in
+> `tests/core-retry.test.js` without inventing a fake integration; wiring an
+> n8n node's own retry-on-fail setting for the live Slack/Sheets sends is a
+> canvas change for a human to make, left for later rather than done
+> unilaterally here. Every other scenario in section 10 (temperature bands,
+> dedupe precedence, validation, low confidence, booking/reply stops,
+> invalid-JSON-twice, provider unavailable/timeout, prompt injection,
+> concurrent duplicate webhooks, cross-provider parity) already had an
+> automated assertion before this pass — M8 closes the one gap the codebase's
+> own comments had flagged since M3: `scoreLead.js`'s catch block used to say
+> outright that a transport failure "does not earn... retry... that is the
+> M8 pass." Semgrep was not installed or run — not present in this
+> environment, and per this session's own instruction not installed
+> unilaterally; running it is a still-open manual step. 668 tests, 667
+> passing, 1 skipped (the M2 hosted-parity marker), up from 640 — the new
+> module and its regenerated `dist/nodes/retry.js`, one existing test that
+> asserted the old no-retry behaviour rewritten to assert the new one, and no
+> other `src/core/`, `dist/nodes/`, or `db/` file touched. See
+> `PROJECT_SPEC.md` §9 for the full milestone plan. This README is expanded
+> into full documentation at M9.
 
 ---
 

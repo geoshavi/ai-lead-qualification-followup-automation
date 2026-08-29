@@ -26,6 +26,8 @@ import { createAnthropicLlm } from './anthropicLlm.js';
 import { createOllamaLlm } from './ollamaLlm.js';
 import { createOpenAiLlm } from './openaiLlm.js';
 
+import { DEFAULT_RETRY_POLICY, backoffDelayMs, isRetryableFailure, shouldRetry } from '../../core/retry.js';
+
 /** Spec section 12 defaults, used when the environment omits them. */
 const DEFAULT_OLLAMA_MODEL = 'qwen2.5:7b-instruct';
 
@@ -85,10 +87,44 @@ function numberOrUndefined(value) {
   return Number.isFinite(parsed) && parsed > 0 ? parsed : undefined;
 }
 
+const defaultSleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
 /**
- * Score one lead, with the single retry section 5.3 allows.
+ * Call the provider, retrying a transient transport failure with backoff
+ * (spec 9, M8) before giving up. A malformed *answer* is a different thing
+ * and is not retried here — that is the caller's own section 5.3 retry, one
+ * layer up, which tries again with a stricter prompt rather than the exact
+ * same request.
  *
- * @param {{lead: object, provider: object, env?: object, timeoutMs?: number}} input
+ * @returns {Promise<{response: object, transportAttempts: number}>}
+ */
+async function callProviderWithRetry(provider, request, options = {}) {
+  const policy = options.retryPolicy ?? DEFAULT_RETRY_POLICY;
+  const sleep = options.sleepImpl ?? defaultSleep;
+
+  let attempt = 0;
+  for (;;) {
+    attempt += 1;
+    try {
+      const response = await provider.scoreLead(request);
+      return { response, transportAttempts: attempt };
+    } catch (error) {
+      if (!isRetryableFailure(error) || !shouldRetry(attempt, policy)) {
+        error.transportAttempts = attempt;
+        throw error;
+      }
+      await sleep(backoffDelayMs(attempt, policy));
+    }
+  }
+}
+
+/**
+ * Score one lead, with the single retry section 5.3 allows for a malformed
+ * answer, and bounded retry-with-backoff (spec 9, M8) for a transient
+ * transport failure.
+ *
+ * @param {{lead: object, provider: object, env?: object, timeoutMs?: number,
+ *          retryPolicy?: object, sleepImpl?: (ms: number) => Promise<void>}} input
  */
 export async function scoreLead(input) {
   const { lead, provider } = input;
@@ -110,19 +146,28 @@ export async function scoreLead(input) {
 
     let response;
     try {
-      response = await provider.scoreLead({
-        systemPrompt: prompt.systemPrompt,
-        userPrompt: prompt.userPrompt,
-        responseSchema: prompt.responseSchema,
-        timeoutMs: input.timeoutMs,
-      });
+      const result = await callProviderWithRetry(
+        provider,
+        {
+          systemPrompt: prompt.systemPrompt,
+          userPrompt: prompt.userPrompt,
+          responseSchema: prompt.responseSchema,
+          timeoutMs: input.timeoutMs,
+        },
+        { retryPolicy: input.retryPolicy, sleepImpl: input.sleepImpl },
+      );
+      response = result.response;
     } catch (error) {
-      // A broken connection is not a malformed answer, so it does not earn the
-      // section 5.3 retry. Backoff on transport failures is the M8 pass.
+      // A broken connection is not a malformed answer, so it does not earn
+      // the section 5.3 retry above — it already had its own bounded
+      // retry-with-backoff in callProviderWithRetry (spec 9, M8), and only
+      // reaches here once that is exhausted or the failure kind is not one
+      // retrying can fix (isRetryableFailure).
       const kind = error instanceof LlmError ? error.kind : 'provider_error';
       return failure({
         events,
         attempts,
+        transportAttempts: error.transportAttempts,
         provider,
         sanitized,
         reason: `provider_${kind}`,
@@ -204,7 +249,7 @@ export async function scoreLead(input) {
  * score, and a person is asked to look (spec 5.0, 5.3).
  */
 function failure(context) {
-  const { events, attempts, provider, sanitized, reason, message } = context;
+  const { events, attempts, transportAttempts, provider, sanitized, reason, message } = context;
 
   const patch = buildScoreFailurePatch({ reason });
 
@@ -217,7 +262,13 @@ function failure(context) {
   events.push({
     event_type: EVENT_TYPE.AI_SCORE_INVALID,
     status: EVENT_STATUS.FAILURE,
-    details: { provider: provider?.provider ?? null, model: provider?.model ?? null, attempts, reason },
+    details: {
+      provider: provider?.provider ?? null,
+      model: provider?.model ?? null,
+      attempts,
+      ...(transportAttempts ? { transport_attempts: transportAttempts } : {}),
+      reason,
+    },
     error_message: message,
   });
 
