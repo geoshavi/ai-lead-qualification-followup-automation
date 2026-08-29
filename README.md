@@ -4,9 +4,9 @@
 
 Production-style AI lead qualification and follow-up automation built with **n8n, PostgreSQL, Anthropic Claude, Slack, and Google Sheets**.
 
-The system receives and validates leads, deduplicates them safely at the database layer, scores them with Claude, assigns a deterministic temperature, starts a database-backed follow-up sequence, handles replies and bookings, sends high-value alerts to Slack, and synchronizes confirmed bookings to Google Sheets.
+The system receives website leads, validates and deduplicates them, scores them with Claude, assigns a deterministic lead temperature, initializes a database-backed follow-up sequence, stops follow-ups when a lead replies or books, sends high-value alerts to Slack, and synchronizes confirmed bookings to Google Sheets.
 
-The project is complete through its full M0–M9 milestone plan.
+The full project milestone plan **M0–M9 is complete**.
 
 ## Final verification
 
@@ -14,44 +14,31 @@ The project is complete through its full M0–M9 milestone plan.
 - **667 passing**
 - **1 expected skip**
 - **0 failing**
-- Three working n8n workflows
+- Three completed n8n workflows
 - Real Anthropic Claude scoring verified
+- Real Claude follow-up generation verified
 - Real Slack HOT-lead alert verified
-- Real booking Slack confirmation verified
+- Real Slack booking confirmation verified
 - Real Google Sheets booking sync verified
 - Scheduler advancement and stop conditions verified against live PostgreSQL
-- Duplicate booking and notification idempotency verified
-- Authentication, validation, human-review, booking, reply-stop, and 404/401 failure paths verified
+- Duplicate notification and booking idempotency verified
+- Authentication, validation, human-review, booking, reply-stop, 404, and 401 paths verified
 
 ---
 
 ## Tech stack
 
-| Layer | Current project |
+| Layer | Implementation |
 | --- | --- |
 | Workflow automation | n8n, self-hosted with Docker |
 | Database | PostgreSQL |
-| Verified live LLM | Anthropic Claude |
-| Local / $0 LLM option | Ollama + `qwen2.5:7b-instruct` |
-| Alerts | Slack Incoming Webhook |
-| Reporting | Google Sheets via n8n OAuth2 |
-| Tests | Node.js built-in `node:test` |
-| Runtime safety | `DRY_RUN`, DB constraints, bounded retries, audit events |
-| Business timezone | `America/Los_Angeles` in the verified demo |
-
-### About the $0 option
-
-The architecture was designed with a **$0-capable local path**:
-
-- local n8n
-- local PostgreSQL
-- Ollama
-- `qwen2.5:7b-instruct`
-- `DRY_RUN=true`
-
-That is not the same thing as saying the verified live demo used no paid API.
-
-The final live scoring and follow-up-generation tests were performed with **Anthropic Claude**. Ollama/Qwen remains the local fallback / zero-cost configuration supported by the project.
+| AI / LLM | Anthropic Claude |
+| HOT lead alerts | Slack |
+| Booking notifications | Slack |
+| Booking reporting | Google Sheets via n8n OAuth2 |
+| Automated tests | Node.js built-in `node:test` |
+| Runtime safety | `DRY_RUN`, database constraints, bounded retries, audit events |
+| Business timezone | `America/Los_Angeles` |
 
 ---
 
@@ -62,11 +49,9 @@ flowchart TD
 
     WEB["Website Lead Webhook"] --> W1
 
-    META["Meta Lead Payload"] -. "normalization supported in code" .-> NORM
-    MAIL["Inbound Email Payload"] -. "normalization supported in code" .-> NORM
-
     subgraph W1["Workflow 1 — AI Lead Qualification / Website Intake"]
-        NORM["Auth + Normalize + Validate"] --> DEDUPE["Dedupe / Upsert"]
+        AUTH["Webhook Authentication"] --> NORM["Normalize + Validate"]
+        NORM --> DEDUPE["Dedupe / Upsert"]
         DEDUPE --> SCORE["Anthropic Claude Scoring"]
         SCORE --> FOLLOW["Start Follow-Up State"]
         FOLLOW --> HOT{"HOT?"}
@@ -77,13 +62,15 @@ flowchart TD
     DEDUPE -.-> PG[("PostgreSQL")]
     SCORE -.-> PG
     FOLLOW -.-> PG
+    SCORE --> CLAUDE{{"Anthropic Claude"}}
+    ALERT --> SLACK{{"Slack"}}
 
     CRON["Schedule Trigger — every 15 min"] --> W2
 
     subgraph W2["Workflow 2 — AI Lead Follow-Up Scheduler"]
         DUE["Find Due Leads"] --> STOP["Evaluate Stop Conditions"]
         STOP -->|Continue| CLAIM["Claim Follow-Up Step"]
-        CLAIM --> GEN["Claude Follow-Up Generation"]
+        CLAIM --> GEN["Generate Follow-Up with Claude"]
         GEN --> LOG["Log FOLLOWUP_SENT"]
         LOG --> ADVANCE["Advance Follow-Up State"]
         STOP -->|Stop| STOPLOG["Log FOLLOWUP_STOPPED"]
@@ -92,6 +79,7 @@ flowchart TD
     DUE -.-> PG
     ADVANCE -.-> PG
     STOPLOG -.-> PG
+    GEN --> CLAUDE
 
     BOOK["Booking Webhook"] --> W3
 
@@ -103,19 +91,9 @@ flowchart TD
 
     FIND -.-> PG
     CANCEL -.-> PG
+    BOOKSLACK --> SLACK
+    SHEET --> SHEETS{{"Google Sheets"}}
 ```
-
-## Source support vs. live wiring
-
-The normalization layer supports three payload types:
-
-- website
-- Meta lead ads
-- inbound email
-
-The **live n8n intake canvas currently uses the website webhook**.
-
-Meta and email payload normalization are implemented and tested in the codebase, but separate live Meta/email trigger integrations were not built as part of the final demo.
 
 ---
 
@@ -124,10 +102,10 @@ Meta and email payload normalization are implemented and tested in the codebase,
 | # | Workflow | Trigger | Purpose |
 | --- | --- | --- | --- |
 | 1 | **AI Lead Qualification — Website Intake** | Webhook | Authentication, validation, dedupe, Claude scoring, follow-up initialization, HOT Slack alerts |
-| 2 | **AI Lead Follow-Up Scheduler** | Every 15 minutes | Finds due leads, evaluates stop conditions, generates follow-up copy, logs the send, advances state |
-| 3 | **AI Lead Booking + Reporting** | Booking webhook | Marks leads booked, cancels active follow-ups, sends booking confirmation, updates Google Sheets |
+| 2 | **AI Lead Follow-Up Scheduler** | Every 15 minutes | Finds due leads, evaluates stop conditions, generates follow-up copy with Claude, records the step, advances state |
+| 3 | **AI Lead Booking + Reporting** | Booking webhook | Marks leads booked, cancels active follow-ups, sends Slack confirmation, updates Google Sheets |
 
-Detailed node-by-node guides:
+Detailed node-by-node documentation:
 
 - `docs/workflow.md`
 - `docs/scheduler.md`
@@ -140,33 +118,41 @@ Detailed node-by-node guides:
 
 The website intake workflow:
 
-1. receives a webhook
-2. validates the shared secret
+1. receives a lead through a webhook
+2. validates the shared webhook secret
 3. normalizes and validates the payload
-4. builds the dedupe identity
+4. derives the dedupe identity
 5. safely upserts the lead into PostgreSQL
-6. logs CRM/audit events
+6. writes audit events
 7. builds a sanitized scoring prompt
 8. calls Anthropic Claude
 9. validates the returned score
-10. retries malformed model output once using a stricter prompt
+10. retries malformed model output once with a stricter prompt
 11. assigns `HOT`, `WARM`, or `COLD` deterministically
 12. initializes follow-up state
-13. sends a Slack alert for HOT leads when `DRY_RUN=false`
+13. sends a Slack alert for HOT leads when outbound sending is enabled
 
-### Temperature is deterministic
+## Deterministic lead temperature
 
-Claude returns the score and reasoning.
+Claude returns the **score and reasoning**.
 
-Claude does **not** decide whether a lead is HOT, WARM, or COLD.
+Claude does not choose the final temperature.
 
-That mapping is performed deterministically by:
+The application maps the score to:
+
+```text
+HOT
+WARM
+COLD
+```
+
+using deterministic business logic in:
 
 ```text
 src/core/temperature.js
 ```
 
-This avoids contradictions such as:
+This prevents contradictory output such as:
 
 ```text
 score: 30
@@ -177,38 +163,35 @@ temperature: HOT
 
 # Workflow 2 — Follow-Up Scheduler
 
-The scheduler runs every 15 minutes and queries PostgreSQL for leads whose:
+The scheduler runs every 15 minutes.
 
-```text
-followup_status = IN_PROGRESS
-next_followup_at <= now()
-```
+It queries PostgreSQL for leads whose follow-up is active and due, then:
 
-It then:
-
-- evaluates reply / booking / CRM stop conditions
+- evaluates stop conditions
 - claims the follow-up step idempotently
 - builds a sanitized follow-up prompt
-- generates the follow-up copy using Claude
+- generates follow-up copy using Anthropic Claude
 - records `FOLLOWUP_SENT`
 - advances `followup_step`
-- updates `last_contacted_at`
-- calculates the next allowed business-time send
+- sets `last_contacted_at`
+- calculates the next allowed business-time follow-up
 - or records `FOLLOWUP_STOPPED`
 
-### Important current-demo boundary
+## Current delivery boundary
 
-The scheduler currently **generates and records the follow-up message**, but the demo does not contain a real email/SMS delivery provider.
+The scheduler **generates and records follow-up content**, but this portfolio implementation does not connect a real email or SMS delivery provider.
 
-`FOLLOWUP_SENT` therefore represents the scheduler's audited send step in this portfolio implementation.
+`FOLLOWUP_SENT` therefore represents the audited scheduler send step and generated message in the current implementation.
 
-Adding an actual email/SMS provider would be an integration-layer extension rather than a change to the scheduling/state machine itself.
+Adding an email/SMS provider would be an integration-layer extension; the scheduling and state-management logic already exists independently.
 
 ---
 
-# Why there is no n8n Wait node
+# Why follow-up state lives in PostgreSQL
 
-Follow-up state lives in PostgreSQL:
+The project does not keep one long-running workflow execution open for every lead.
+
+Instead, follow-up state is persisted in PostgreSQL:
 
 ```text
 followup_status
@@ -217,48 +200,38 @@ next_followup_at
 last_contacted_at
 ```
 
-The scheduler polls explicit database state instead of keeping one long-running n8n execution open for every lead.
+The scheduler polls that state every 15 minutes.
 
-This makes follow-up state:
+This makes follow-up behavior:
 
 - queryable
 - auditable
 - restart-friendly
 - easy to debug
-- independent of one long-lived workflow execution
+- independent of one long-lived execution
 
 ---
 
 # Workflow 3 — Booking & Reporting
 
-The booking webhook:
+The booking workflow:
 
-1. authenticates the request
-2. resolves the lead
-3. marks:
+1. authenticates the booking webhook
+2. finds the existing lead
+3. sets:
    - `booking_status = BOOKED`
    - `crm_status = BOOKED`
-4. stops the follow-up sequence only when it was actually `IN_PROGRESS`
+4. stops the follow-up sequence when it is currently `IN_PROGRESS`
 5. clears `next_followup_at`
 6. logs `BOOKING_RECEIVED`
-7. logs `FOLLOWUP_STOPPED` when a sequence was actually stopped
+7. logs `FOLLOWUP_STOPPED` when a running sequence was actually stopped
 8. idempotently claims the booking confirmation
-9. sends a Slack confirmation when `DRY_RUN=false`
-10. appends or updates the booking row in Google Sheets
+9. sends a Slack booking confirmation
+10. appends or updates the booking in Google Sheets
 
-The live booking flow was verified with both:
+This workflow was verified with both safe dry-run execution and a real outbound run.
 
-```text
-DRY_RUN=true
-```
-
-and:
-
-```text
-DRY_RUN=false
-```
-
-The non-dry-run test produced both:
+The real outbound test produced:
 
 ```text
 SLACK_ALERT_SENT = SUCCESS
@@ -269,9 +242,9 @@ SHEET_SYNCED      = SUCCESS
 
 # PostgreSQL state & idempotency
 
-The database, not workflow timing, enforces the important duplicate guarantees.
+Important duplicate guarantees are enforced by PostgreSQL rather than by timing-sensitive workflow checks.
 
-## Lead dedupe
+## Lead deduplication
 
 ```text
 leads.dedupe_key UNIQUE
@@ -279,29 +252,29 @@ leads.dedupe_key UNIQUE
 
 Repeated submissions cannot create duplicate lead rows.
 
-## Notification claims
+## Notification idempotency
 
 ```text
 notifications (lead_id, kind, step) UNIQUE
 ```
 
-This protects:
+This protects notification kinds including:
 
-- `SLACK_HOT`
-- `FOLLOWUP`
-- `BOOKING_CONFIRM`
+```text
+SLACK_HOT
+FOLLOWUP
+BOOKING_CONFIRM
+```
 
-from duplicate claims.
+The live booking acceptance test confirmed that sending the same booking event again:
 
-The booking acceptance test confirmed that a repeated identical booking POST:
+- created another `BOOKING_RECEIVED` audit event
+- did not create a second `FOLLOWUP_STOPPED`
+- did not send a duplicate booking Slack confirmation
 
-- logged a second `BOOKING_RECEIVED`
-- did **not** create a second `FOLLOWUP_STOPPED`
-- did **not** send a duplicate booking Slack notification
+## Audit trail
 
-## Audit log
-
-`lead_events` is append-only application history.
+`lead_events` stores append-only workflow history.
 
 Examples include:
 
@@ -317,127 +290,105 @@ SHEET_SYNCED
 WORKFLOW_ERROR
 ```
 
-This makes workflow behavior inspectable directly from PostgreSQL rather than relying only on the n8n UI.
+The acceptance tests query these events directly from PostgreSQL.
 
 ---
 
-# Anthropic Claude and local Ollama
+# Anthropic Claude
 
-## Verified live provider
+Anthropic Claude is the **actual LLM used by the completed live demo**.
 
-The completed demo uses:
+Claude is used for:
+
+- lead scoring
+- scoring reasoning
+- follow-up message generation
+
+The live n8n workflows call Anthropic through HTTP Request nodes.
+
+Model output is never blindly trusted.
+
+Responses are passed through:
+
+- sanitization
+- schema/output validation
+- score parsing
+- deterministic temperature mapping
+- failure handling
+- human-review fallback
+
+A malformed scoring response receives one stricter retry.
+
+If scoring still fails, the lead remains persisted and is routed to:
 
 ```text
-Anthropic Claude
+crm_status = HUMAN_REVIEW
+needs_human_review = true
 ```
 
-for live scoring and follow-up generation.
-
-The live n8n canvas uses Anthropic HTTP Request nodes.
-
-## Local fallback / $0 path
-
-The source adapter layer also supports:
-
-```text
-LLM_PROVIDER=ollama
-OLLAMA_MODEL=qwen2.5:7b-instruct
-```
-
-This allows local experimentation without a paid LLM API.
-
-OpenAI adapter support also exists in the source adapter layer.
-
-### Important distinction
-
-Provider abstraction in `src/adapters/llm/` is tested in code.
-
-The final live n8n canvases themselves are currently configured specifically for **Anthropic Claude**.
-
-Changing the live canvas to another provider may require provider-specific HTTP Request configuration; it should not be described as a guaranteed environment-variable-only switch in the current live canvas.
-
----
-
-# Ollama hardware guidance
-
-`qwen2.5:7b-instruct` is approximately a 7B-parameter local model.
-
-Typical development guidance:
-
-- CPU-only machines can run it, but responses may be slow
-- 16 GB system memory is a more comfortable baseline
-- GPU acceleration significantly improves latency
-- a smaller instruct model can be selected through `OLLAMA_MODEL` on constrained machines
-
-None of this is required when using Anthropic Claude.
+The lead is never silently discarded because an AI call failed.
 
 ---
 
 # Retry & resilience
 
-There are two different retry mechanisms in the project.
+The project has two resilience layers.
 
-## Source-code retry policy
+## Source-level retry policy
 
 ```text
 src/core/retry.js
 ```
 
-implements deterministic bounded retry/backoff logic for the adapter/test path.
+contains deterministic bounded retry/backoff behavior for the source adapter/test path.
 
-Transient failures include:
+Transient failure categories include:
 
 - timeout
 - unreachable provider
 - HTTP `429`
 - HTTP `5xx`
 
-Fixed failures such as normal `4xx` bad requests are not blindly retried.
+Non-transient errors are not blindly retried.
 
-The default policy is bounded to three total attempts.
+The retry policy is bounded and cannot loop forever.
 
-## Live n8n node retries
+## Live n8n retry settings
 
-The final hardening pass manually enabled:
+During the M8 hardening pass, n8n `Retry On Fail` was enabled and verified on these external-call nodes:
 
 ```text
-Retry On Fail = ON
-Max Tries     = 3
-Wait          = 1000 ms
-On Error      = Stop Workflow
+Claude Score
+Claude Retry
+Claude Follow-up
+Send Booking Confirmation
+Sync Booking to Sheet
 ```
 
-on the verified external-call nodes:
+Settings:
 
-- `Claude Score`
-- `Claude Retry`
-- `Claude Follow-up`
-- `Send Booking Confirmation`
-- `Sync Booking to Sheet`
+```text
+Retry On Fail: ON
+Max Tries: 3
+Wait Between Tries: 1000 ms
+On Error: Stop Workflow
+```
 
-These settings complement the source-code retry policy.
+These live n8n settings are separate from the source-level retry policy.
 
-They are not the same mechanism.
-
-### Retry evidence boundary
-
-The settings above were manually verified/configured in n8n.
-
-The project has **not** yet performed a deliberate live provider/network failure injection to demonstrate one of those n8n retries firing during an execution.
-
-`Send Slack HOT Alert` is also not claimed here as having had its Retry On Fail setting independently rechecked during the final M8 hardening pass.
+The project does **not** claim that a deliberate live network outage was injected to demonstrate these settings firing.
 
 ---
 
 # DRY_RUN safety
 
-Default:
+The safe default is:
 
 ```text
 DRY_RUN=true
 ```
 
-External Slack and Google Sheets side effects are skipped while their intended actions remain auditable.
+Outbound Slack and Google Sheets actions can be skipped while the intended action remains visible in the audit trail.
 
 Examples:
 
@@ -446,39 +397,35 @@ SLACK_ALERT_SENT / SKIPPED
 SHEET_SYNCED / SKIPPED
 ```
 
-For the live M7 acceptance test, `DRY_RUN` was intentionally changed to:
+For the live booking acceptance test, `DRY_RUN` was temporarily changed to:
 
 ```text
 false
 ```
 
-for one real Slack + Sheets test and then restored to:
+A real Slack booking confirmation and a real Google Sheets write were successfully produced.
+
+After verification, the environment was restored to:
 
 ```text
-true
+DRY_RUN=true
 ```
-
-after verification.
-
-The final runtime configuration was returned to safe dry-run mode.
 
 ---
 
 # Business timezone
 
-Follow-up scheduling uses:
+The verified demo uses:
 
 ```text
 BUSINESS_TZ=America/Los_Angeles
 ```
 
-in the verified local demo.
+Follow-up times are clamped to the configured business window.
 
-The follow-up engine clamps sends to business hours and moves out-of-window sends to the next allowed business period.
+During live testing, a timezone configuration gap was discovered:
 
-A real integration gap was discovered during live verification:
-
-`compose.yaml` originally configured n8n's timezone but did not explicitly expose a variable named:
+the n8n container had timezone-related variables but did not expose a variable literally named:
 
 ```text
 BUSINESS_TZ
@@ -492,15 +439,15 @@ The fix added:
 BUSINESS_TZ: ${BUSINESS_TZ}
 ```
 
-to the n8n service environment.
+to the n8n service environment in `compose.yaml`.
 
-After recreating the container, a live follow-up calculation produced:
+After recreating the container, live verification produced:
 
 ```text
 2026-08-31 16:00:00+00
 ```
 
-which correctly corresponds to:
+which equals:
 
 ```text
 09:00 America/Los_Angeles
@@ -508,47 +455,56 @@ which correctly corresponds to:
 
 for that date.
 
-The same fix was verified through both intake `startFollowup` and scheduler `advanceFollowup`.
+The corrected timezone behavior was verified through both:
+
+```text
+startFollowup
+advanceFollowup
+```
 
 ---
 
 # Slack
 
-The live demo uses Slack for two purposes.
+Slack is used for two live notification paths.
 
 ## HOT lead alert
 
-A verified HOT lead produced:
+A verified HOT lead produced a real Slack alert containing:
 
-- Name: Vako SlackTest
-- Company: Demo Automation LLC
-- Score: 88
-- AI reasoning
-- recommended action
+```text
+Name: Vako SlackTest
+Company: Demo Automation LLC
+Score: 88
+Reasoning: ...
+Recommended action: ...
+```
 
-Duplicate processing did not create a second HOT alert.
+The notification idempotency guard prevented duplicate HOT alert behavior during duplicate processing.
 
 ## Booking confirmation
 
-A real non-dry-run booking produced a second Slack message confirming that the lead booked a call.
+A real booking test produced:
 
-Slack messages use the configured webhook integration.
+```text
+📅 Vako SchedulerTest2 just booked a call — Demo Automation LLC
+```
 
-No Slack SDK dependency exists inside `src/core`.
+The booking confirmation is protected by the `BOOKING_CONFIRM` notification claim.
 
 ---
 
 # Google Sheets
 
-Workflow 3 synchronizes bookings to:
+Workflow 3 synchronizes booked leads into:
 
 ```text
 AI Lead Bookings
 ```
 
-using n8n's built-in Google Sheets node and an OAuth2 credential stored in n8n.
+using n8n's built-in Google Sheets node and OAuth2.
 
-The verified live sheet contains:
+Verified columns:
 
 ```text
 lead_id
@@ -572,11 +528,7 @@ Matching column:
 lead_id
 ```
 
-This means repeated synchronization of the same lead updates the existing row instead of intentionally creating another booking row.
-
-The verified live canvas selected the Google Sheet directly in the Google Sheets node using its Sheet URL/ID and OAuth credential.
-
-No Google OAuth secret is stored in `src/core`.
+A real booking was successfully written to the Sheet during the live acceptance test.
 
 ---
 
@@ -594,23 +546,23 @@ validated against:
 WEBHOOK_SECRET
 ```
 
-Security controls include:
+The final project includes:
 
-- constant-time shared-secret comparison
+- constant-time shared-secret validation
 - input validation
-- prompt sanitization
-- explicit untrusted-text delimiters
+- untrusted-input sanitization
 - prompt-injection heuristics
+- explicit prompt delimiters
 - constrained LLM output parsing
-- bounded retry policies
-- database constraints
-- append-only audit events
+- bounded retries
+- database uniqueness constraints
+- audit logging
 - `.env` excluded from Git
-- no secret values committed to the repository
+- no committed runtime secret values
 
-Prompt-injection detection is intentionally used as a **signal**, not as a reason to silently delete a lead.
+Prompt-injection detection is used as a **risk signal**, not as a reason to silently throw a real lead away.
 
-Full security reasoning:
+See:
 
 ```text
 docs/security.md
@@ -624,43 +576,27 @@ docs/security.md
 
 - Node.js 20+
 - Docker Desktop
-- n8n via `compose.yaml`
-- PostgreSQL via `compose.yaml`
-- Anthropic API key for the verified Claude path
-
-Optional:
-
-- Ollama for the local $0 LLM path
-- Slack workspace
-- Google account for Sheets OAuth
+- Anthropic API key
+- Slack webhook for live alert testing
+- Google account / OAuth credential for live Google Sheets testing
 
 ## Environment
 
-```bash
-cp .env.example .env
+Create:
+
+```text
+.env
+```
+
+from:
+
+```text
+.env.example
 ```
 
 Never commit `.env`.
 
-## Tests
-
-No npm package installation is required for the test suite.
-
-```bash
-npm test
-```
-
-Final verified result:
-
-```text
-tests       668
-pass        667
-fail        0
-cancelled   0
-skipped     1
-```
-
-## Start the local stack
+## Start the stack
 
 ```bash
 docker compose up -d
@@ -681,50 +617,74 @@ db/002_indexes.sql
 
 ---
 
-# Repository layout
+# Automated tests
+
+Run:
+
+```bash
+npm test
+```
+
+Final verified result:
+
+```text
+tests       668
+pass        667
+fail        0
+cancelled   0
+skipped     1
+```
+
+The skipped test is an optional external hosted-parity path requiring additional configuration.
+
+The normal test suite does not make live Anthropic, Slack, or Google Sheets calls.
+
+---
+
+# Repository structure
 
 ```text
 src/core/       dependency-free business logic
-src/adapters/   LLM and CRM adapters / I/O boundaries
+src/adapters/   LLM and database I/O adapters
 db/             PostgreSQL schema and indexes
-tests/          automated test suite
-fixtures/       source and LLM test fixtures
+tests/          automated tests
+fixtures/       test fixtures
 dist/nodes/     generated n8n Code-node snippets
-docs/           workflow, scheduler, booking and security guides
+docs/           workflow, scheduler, booking, security documentation
 compose.yaml    local n8n + PostgreSQL runtime
 ```
 
-`src/core/` is intentionally dependency-free.
+`src/core/` is dependency-free.
 
-`dist/nodes/` is generated from `src/core/`:
+`dist/nodes/` is generated from the source modules:
 
 ```bash
 npm run build:nodes
 ```
 
-Generated files should not be hand-edited.
+Generated snippets should not be edited manually.
 
-This repository intentionally does **not** contain exported n8n workflow JSON.
+The repository intentionally does not contain exported n8n workflow JSON.
 
-The three canvases were built manually in n8n from the documented node-by-node guides.
+The three workflows were built manually from the node-by-node documentation.
 
 ---
 
 # Screenshots
 
-## n8n — all three workflows
+## Workflow overview
 
-![n8n workflows overview](docs/screenshots/01-workflows-overview.png)
+![n8n workflow overview](docs/screenshots/01-workflows-overview.png)
 
-## Workflow 1 — Intake & Scoring
+## AI Lead Qualification — Website Intake
 
 ![AI Lead Qualification workflow](docs/screenshots/02-intake-scoring.png)
 
-## Workflow 2 — Follow-Up Scheduler
+## AI Lead Follow-Up Scheduler
 
 ![AI Lead Follow-Up Scheduler](docs/screenshots/03-followup-scheduler.png)
 
-## Workflow 3 — Booking & Reporting
+## AI Lead Booking + Reporting
 
 ![AI Lead Booking and Reporting](docs/screenshots/04-booking-reporting.png)
 
@@ -732,11 +692,11 @@ The three canvases were built manually in n8n from the documented node-by-node g
 
 ![Slack HOT lead and booking alerts](docs/screenshots/05-slack-alerts.png)
 
-## Google Sheets booking sync
+## Real Google Sheets booking
 
-![Google Sheets booking sync](docs/screenshots/06-google-sheet.png)
+![Google Sheets booking row](docs/screenshots/06-google-sheet.png)
 
-## Full automated test suite
+## Automated test suite
 
 ![668 tests with zero failures](docs/screenshots/07-tests.png)
 
@@ -744,23 +704,24 @@ The three canvases were built manually in n8n from the documented node-by-node g
 
 # Verified live behavior
 
-The following was verified against the real running n8n + PostgreSQL stack.
+## Intake workflow
 
-## Intake
+Verified live:
 
-- valid lead creation
-- validation behavior
-- duplicate behavior
-- Claude scoring
-- HOT/WARM state
-- human-review failure path
+- webhook authentication
+- validation
+- lead creation
+- duplicate handling
+- Anthropic Claude scoring
+- HOT/WARM handling
+- AI failure → human review
 - real HOT Slack alert
-- correct follow-up initialization
-- timezone handling
+- follow-up initialization
+- business-time calculation
 
 ## Scheduler
 
-A seeded due lead:
+A due lead advanced:
 
 ```text
 followup_step: 0 → 1
@@ -772,15 +733,15 @@ and produced exactly one:
 FOLLOWUP_SENT
 ```
 
-An immediate second run sent nothing.
+An immediate second scheduler run did not resend it.
 
-A lead with:
+When:
 
 ```text
 replied_at != NULL
 ```
 
-was changed to:
+the scheduler changed the lead to:
 
 ```text
 followup_status = STOPPED
@@ -794,16 +755,16 @@ FOLLOWUP_STOPPED
 reason = lead_replied
 ```
 
-without sending the next step.
+without generating the next follow-up step.
 
 ## Booking
 
-A mid-sequence booking produced:
+A booking on an active sequence produced:
 
 ```text
-booking_status  = BOOKED
-crm_status      = BOOKED
-followup_status = STOPPED
+booking_status   = BOOKED
+crm_status       = BOOKED
+followup_status  = STOPPED
 next_followup_at = NULL
 ```
 
@@ -820,11 +781,11 @@ with:
 reason = booking_confirmed
 ```
 
-A repeated POST did not duplicate the follow-up stop or booking confirmation.
+A repeat booking event did not duplicate the stop event or Slack confirmation.
 
-A PENDING lead stayed PENDING because no active sequence existed to stop.
+A lead whose follow-up status was `PENDING` remained `PENDING`, because no active sequence existed to stop.
 
-A nonexistent lead correctly returned:
+An unknown lead correctly returned:
 
 ```text
 404
@@ -837,9 +798,15 @@ and logged:
 WORKFLOW_ERROR
 ```
 
-after enabling n8n's **Always Output Data** setting on `Find Lead by ID`.
+after the `Find Lead by ID` node was corrected to use n8n's:
 
-A wrong token correctly returned:
+```text
+Always Output Data
+```
+
+setting.
+
+A request with an invalid token correctly returned:
 
 ```text
 401
@@ -848,86 +815,67 @@ A wrong token correctly returned:
 
 ---
 
-# Automated test coverage
+# Project limitations
 
-The final suite covers:
+The current implementation intentionally does not claim features that were not built live.
 
-- source normalization
-- validation
-- dedupe precedence
-- deterministic temperature bands
-- prompt building
-- score parsing
-- invalid-model-output recovery
-- provider adapters
-- Ollama unavailable/timeout behavior
-- human-review behavior
-- scheduler cadence
-- stop conditions
-- booking stops
-- reply stops
-- notification idempotency
-- concurrent duplicate protection
-- prompt-injection handling
-- generated n8n snippet fidelity
-- PostgreSQL schema constraints
-- index behavior
-- retry/backoff policy
+Current boundaries:
 
-Final result:
-
-```text
-668 tests
-667 passed
-1 skipped
-0 failed
-```
-
-The single skipped test is the optional hosted PostgreSQL/PostgREST parity path and requires external configuration.
-
----
-
-# Current limitations / intentionally unfinished integrations
-
-These are not hidden:
-
-- live Meta Lead Ads trigger is not wired
-- live inbound-email trigger is not wired
-- follow-up copy is generated and audited, but no real email/SMS provider is connected
-- a deliberate live network/provider failure has not yet been injected to demonstrate n8n Retry On Fail firing
-- Semgrep was not installed/run during the project
-- Loom demo recording is still optional/manual
-
-None of these are required for the completed M0–M9 milestone implementation described in `PROJECT_SPEC.md`.
+- website webhook is the live intake trigger
+- Meta/email source normalization exists in the codebase, but dedicated live triggers were not built
+- follow-up text is generated and audited, but no email/SMS delivery provider is connected
+- n8n retry settings were configured, but a deliberate live network failure was not injected
+- Semgrep was not installed or run
+- Loom recording remains a presentation task
 
 ---
 
 # Demo walkthrough
 
-A concise demo can show:
+A strong portfolio demo can show:
 
 1. the three n8n workflows
 2. a website lead entering Workflow 1
-3. Claude scoring and reasoning
-4. the PostgreSQL lead and audit events
-5. HOT Slack alert
-6. the exact same lead submitted again without duplication
-7. scheduler state stored in PostgreSQL rather than long-running wait executions
-8. reply / booking stop behavior
-9. real booking confirmation in Slack
-10. real Google Sheets booking row
-11. the final `667 passed / 1 skipped / 0 failed` test result
+3. Anthropic Claude scoring and reasoning
+4. the PostgreSQL lead state
+5. the audit-event history
+6. the real HOT Slack alert
+7. duplicate submission behavior
+8. database-backed follow-up scheduling
+9. reply-stop behavior
+10. booking-stop behavior
+11. real booking Slack confirmation
+12. real Google Sheets row
+13. final automated tests
 
-The strongest engineering points to emphasize are:
+The strongest engineering points are:
 
-**database-backed idempotency** and **database-backed follow-up scheduling**.
+**database-backed idempotency**
+
+and
+
+**database-backed follow-up scheduling**.
 
 ---
 
-## Project status
+# Project status
 
 **M0–M9 complete.**
 
-The implementation, automated tests, live n8n workflows, PostgreSQL state machine, Claude integration, Slack integration, Google Sheets integration, resilience hardening, and final documentation are complete.
+The completed project includes:
 
-Remaining work is presentation-only: screenshots, optional Loom recording, optional Semgrep review, and any future external channel integrations.
+- three live n8n workflows
+- PostgreSQL state and audit storage
+- Anthropic Claude scoring
+- Claude follow-up generation
+- Slack HOT alerts
+- Slack booking confirmations
+- Google Sheets booking reporting
+- deterministic follow-up scheduling
+- duplicate protection
+- security controls
+- bounded resilience behavior
+- comprehensive automated testing
+- final documentation
+
+Remaining work is presentation-only: README screenshots, optional Loom recording, and any future external channel integrations.
