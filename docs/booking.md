@@ -27,6 +27,7 @@ follow-ups and the Sheet row updates."*
 | A Slack incoming webhook URL | booking confirmation message | free Slack workspace, same `SLACK_WEBHOOK_URL` M4's HOT alert already uses — no second secret |
 | A Google Sheet, and a Google Sheets credential configured **in n8n itself** | reporting sync | a normal Google account — n8n's built-in Google Sheets node holds its own OAuth2 credential; nothing here is your responsibility to create (section 0) |
 | `GOOGLE_SHEET_ID` set to that Sheet's ID | the canvas references the Sheet by ID, not by name | already declared in `.env.example` (section 12) — no new variable |
+| `Find Lead by ID`'s node **Settings → Always Output Data** enabled (2.4) | n8n's default is to emit **no output item at all** when the query matches zero rows — the `IF: lead found?` node (2.5) then never executes, and the request silently falls through to an empty `200` instead of the documented `404` | flip the one setting when building this node — confirmed live (see [Live verification](#live-verification-2026-08-29)) |
 
 M6 is not a hard prerequisite — this canvas cancels a sequence directly (2.6
 below), independent of whether the scheduler ever runs again for this lead.
@@ -156,6 +157,16 @@ SELECT * FROM leads WHERE lead_id = $1;
 
 Bind `$1` from the inbound payload's `lead_id`.
 
+**This node's Settings → Always Output Data must be enabled.** n8n's
+default behaviour for a Postgres node is to emit zero output items when the
+query matches zero rows — not one empty item, none at all. With the default
+left off, a `lead_id` that matches nothing produces no item for 2.5's `IF`
+node to evaluate, so that node never runs and the request falls straight
+through to an empty `200` instead of ever reaching the `404` branch below.
+This is not a hypothetical: it is exactly what happened on the first live
+run of this canvas, before the setting was turned on (see
+[Live verification](#live-verification-2026-08-29)).
+
 PROJECT_SPEC.md names no specific booking/scheduling tool, so there is no
 documented third-party payload shape to match. This guide takes the
 cheapest-to-reverse reading: the booking trigger already knows which lead
@@ -170,7 +181,10 @@ node would need to change.
 
 ### 2.5 IF: lead found?
 
-Condition: the Postgres node above returned a row.
+Condition: the Postgres node above returned a row. **This only evaluates
+at all if 2.4's Always Output Data setting is on** — otherwise a zero-row
+match gives this node nothing to run against, and the whole request falls
+through silently instead of reaching either branch below.
 
 **FALSE branch:** **Postgres node** — `INSERT INTO lead_events (event_type,
 status, details) VALUES ('WORKFLOW_ERROR', 'FAILURE', $1::jsonb)`, `details`
@@ -377,3 +391,53 @@ behavioural-fidelity tests (`tests/build-nodes.test.js`) proving they
 behave identically to their `src/core/` source, and
 `tests/core-followup.test.js` proves `evaluateStopConditions` produces
 exactly the `booking_confirmed` result this canvas relies on.
+
+### Live verification (2026-08-29)
+
+All six steps above were run against the real stack — n8n, Postgres, a
+real Slack webhook, and a real Google Sheet, not `mockCrm` or a dry run
+throughout:
+
+- **Step 1 (mid-sequence booking):** a lead seeded `IN_PROGRESS` at
+  `followup_step = 1` with a future `next_followup_at`. Result:
+  `booking_status = 'BOOKED'`, `crm_status = 'BOOKED'`, `followup_status =
+  'STOPPED'`, `next_followup_at IS NULL`, `followup_step` unchanged at `1`.
+  Exactly one `BOOKING_RECEIVED` row and one `FOLLOWUP_STOPPED` row
+  (`reason: "booking_confirmed"`). With `DRY_RUN=true`: `SLACK_ALERT_SENT`
+  and `SHEET_SYNCED` both logged `SKIPPED`.
+- **Step 2 (repeat POST, idempotency):** the identical booking event fired
+  again. `leads` row unchanged. A **second** `BOOKING_RECEIVED` row was
+  logged (2.8 runs unconditionally), but **no** second `FOLLOWUP_STOPPED`
+  (the sequence was already `STOPPED`, not `IN_PROGRESS` — 2.9's `FALSE`
+  branch) and **no** second `SLACK_ALERT_SENT` (2.10/2.11's `notifications`
+  claim on `BOOKING_CONFIRM`/step `0` was already taken). A second
+  `SHEET_SYNCED`/`SKIPPED` row *did* appear — expected, since 2.13 is not
+  claim-gated the way Slack is.
+- **Step 3 (live outbound, `DRY_RUN=false`):** on a fresh `IN_PROGRESS`
+  lead, both `SLACK_ALERT_SENT` and `SHEET_SYNCED` came back `SUCCESS`
+  (`details` included the real Sheet name and a real-send confirmation) —
+  an actual Slack message posted and an actual row appended/updated in the
+  Sheet — while the booking-cancellation state (`BOOKED`/`BOOKED`/
+  `STOPPED`) was identical to step 1. `DRY_RUN` was restored to `true` and
+  the n8n container recreated afterward.
+- **Step 4 (`PENDING` lead):** a lead that had never started a sequence
+  (`followup_status = 'PENDING'`, scoring had failed earlier) was booked.
+  Result: `booking_status = 'BOOKED'`, `crm_status = 'BOOKED'`,
+  `followup_status` stayed `'PENDING'`, and **no** `FOLLOWUP_STOPPED` row
+  was logged — matching 2.6's `wasInProgress` guard exactly.
+- **Step 5 (unknown `lead_id`):** the **first** live run of this case
+  exposed a real gap, not just confirmed the design: `Find Lead by ID`
+  (2.4) returned zero rows and, by n8n's default node behaviour, emitted
+  **no output item at all** — so `IF: lead found?` (2.5) never executed
+  and the request fell through to an empty `200` instead of the documented
+  `404`. Fixed live by enabling **Always Output Data** in that node's
+  Settings (now called out explicitly in 2.4/2.5 and the prerequisites
+  table above). After the fix: `404` with body `{"error":
+  "lead_not_found"}`, and exactly one `WORKFLOW_ERROR`/`FAILURE` row
+  logged with the unmatched `lead_id` in `details`.
+- **Step 6 (wrong token):** `401` with body `{"error": "unauthorized"}` —
+  identical to the M4 canvas's own auth-failure behaviour.
+
+No `src/core/`, `dist/nodes/`, or `db/` change came out of this pass — the
+one real fix (Always Output Data) is entirely an n8n node setting, which is
+why it is documented here rather than in code.
