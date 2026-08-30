@@ -1,6 +1,12 @@
 <img width="1536" height="1024" alt="download" src="https://github.com/user-attachments/assets/4d1741df-a1a1-4023-b720-082e09f9e80c" />
 
 # 🚀 AI Lead Qualification & Follow-Up Automation
+![n8n](https://img.shields.io/badge/n8n-Automation-EA4B71)
+![Claude](https://img.shields.io/badge/Anthropic-Claude-191919)
+![PostgreSQL](https://img.shields.io/badge/PostgreSQL-Database-336791)
+![Slack](https://img.shields.io/badge/Slack-Alerts-4A154B)
+![Google Sheets](https://img.shields.io/badge/Google%20Sheets-Reporting-34A853)
+![Tests](https://img.shields.io/badge/tests-667%20passing-brightgreen)
 
 Production-style AI lead qualification and follow-up automation built with **n8n, PostgreSQL, Anthropic Claude, Slack, and Google Sheets**.
 
