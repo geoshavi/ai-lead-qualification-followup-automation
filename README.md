@@ -12,7 +12,9 @@ Production-style AI lead qualification and follow-up automation built with **n8n
 
 The system receives website leads, validates and deduplicates them, scores them with Claude, assigns a deterministic lead temperature, initializes a database-backed follow-up sequence, stops follow-ups when a lead replies or books, sends high-value alerts to Slack, and synchronizes confirmed bookings to Google Sheets.
 
-The full project milestone plan **M0–M9 is complete**.
+---
+DEMO ---> https://www.loom.com/share/c1d4b874866348c997084fbcd1961851
+---
 
 ## Final verification
 
