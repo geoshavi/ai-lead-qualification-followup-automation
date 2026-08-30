@@ -1,4 +1,4 @@
-<img width="1536" height="1024" alt="Codex Image 29 Aug 2026, 00_02_33" src="https://github.com/user-attachments/assets/246bd842-18d8-469a-88de-fd97f435970d" />
+<img width="1536" height="1024" alt="download" src="https://github.com/user-attachments/assets/4d1741df-a1a1-4023-b720-082e09f9e80c" />
 
 # 🚀 AI Lead Qualification & Follow-Up Automation
 
