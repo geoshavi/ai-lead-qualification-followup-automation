@@ -670,38 +670,6 @@ The three workflows were built manually from the node-by-node documentation.
 
 ---
 
-# Screenshots
-
-## Workflow overview
-
-![n8n workflow overview](docs/screenshots/01-workflows-overview.png)
-
-## AI Lead Qualification — Website Intake
-
-![AI Lead Qualification workflow](docs/screenshots/02-intake-scoring.png)
-
-## AI Lead Follow-Up Scheduler
-
-![AI Lead Follow-Up Scheduler](docs/screenshots/03-followup-scheduler.png)
-
-## AI Lead Booking + Reporting
-
-![AI Lead Booking and Reporting](docs/screenshots/04-booking-reporting.png)
-
-## Real Slack alerts
-
-![Slack HOT lead and booking alerts](docs/screenshots/05-slack-alerts.png)
-
-## Real Google Sheets booking
-
-![Google Sheets booking row](docs/screenshots/06-google-sheet.png)
-
-## Automated test suite
-
-![668 tests with zero failures](docs/screenshots/07-tests.png)
-
----
-
 # Verified live behavior
 
 ## Intake workflow
